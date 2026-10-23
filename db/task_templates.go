@@ -26,24 +26,30 @@ var (
 // TaskTemplate is a reusable task preset (description/goal + optional category
 // and task-level intercept/allow rules).
 type TaskTemplate struct {
-	ID             int64                    `json:"id"`
-	Name           string                   `json:"name"`
-	NKey           string                   `json:"-"`
-	Description    string                   `json:"description"`
-	Goal           string                   `json:"goal"`
-	CategoryID     *int64                   `json:"category_id"`
-	InterceptRules []TaskInterceptRuleInput `json:"intercept_rules"`
-	CreatedAt      time.Time                `json:"created_at"`
-	UpdatedAt      time.Time                `json:"updated_at"`
+	ID               int64                    `json:"id"`
+	Name             string                   `json:"name"`
+	NKey             string                   `json:"-"`
+	Description      string                   `json:"description"`
+	Goal             string                   `json:"goal"`
+	AgentProfileKey  string                   `json:"agent_profile_key"`
+	AccessMode       string                   `json:"access_mode"`
+	CoordinationMode string                   `json:"coordination_mode"`
+	CategoryID       *int64                   `json:"category_id"`
+	InterceptRules   []TaskInterceptRuleInput `json:"intercept_rules"`
+	CreatedAt        time.Time                `json:"created_at"`
+	UpdatedAt        time.Time                `json:"updated_at"`
 }
 
 // TaskTemplateInput is the create/update payload after normalization.
 type TaskTemplateInput struct {
-	Name           string
-	Description    string
-	Goal           string
-	CategoryID     *int64
-	InterceptRules []TaskInterceptRuleInput
+	Name             string
+	Description      string
+	Goal             string
+	AgentProfileKey  string
+	AccessMode       string
+	CoordinationMode string
+	CategoryID       *int64
+	InterceptRules   []TaskInterceptRuleInput
 }
 
 // TaskTemplatePatch changes only fields flagged as set. Name/Description/Goal use
@@ -53,18 +59,21 @@ type TaskTemplatePatch struct {
 	Name              *string
 	Description       *string
 	Goal              *string
+	AgentProfileKey   *string
+	AccessMode        *string
+	CoordinationMode  *string
 	CategoryID        *int64
 	SetCategoryID     bool
 	InterceptRules    []TaskInterceptRuleInput
 	SetInterceptRules bool
 }
 
-const taskTemplateCols = `id, name, nkey, description, goal, category_id, intercept_rules, created_at, updated_at`
+const taskTemplateCols = `id, name, nkey, description, goal, agent_profile_key, access_mode, coordination_mode, category_id, intercept_rules, created_at, updated_at`
 
 func scanTaskTemplate(row interface{ Scan(...any) error }) (TaskTemplate, error) {
 	var t TaskTemplate
 	var rulesRaw []byte
-	if err := row.Scan(&t.ID, &t.Name, &t.NKey, &t.Description, &t.Goal, &t.CategoryID, &rulesRaw, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &t.NKey, &t.Description, &t.Goal, &t.AgentProfileKey, &t.AccessMode, &t.CoordinationMode, &t.CategoryID, &rulesRaw, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return t, err
 	}
 	t.InterceptRules = []TaskInterceptRuleInput{}
@@ -98,6 +107,12 @@ func normalizeTaskTemplateInput(in TaskTemplateInput) (TaskTemplateInput, string
 	in.Name = taskTemplateName(in.Name)
 	in.Description = strings.TrimSpace(in.Description)
 	in.Goal = strings.TrimSpace(in.Goal)
+	in.AgentProfileKey = NormalizeAgentProfileKey(in.AgentProfileKey)
+	var err error
+	in.AccessMode, in.CoordinationMode, err = NormalizeTaskModes(in.AgentProfileKey, in.AccessMode, in.CoordinationMode)
+	if err != nil {
+		return in, "", err
+	}
 	switch {
 	case in.Name == "":
 		return in, "", fmt.Errorf("%w: name is required", ErrTaskTemplateInvalid)
@@ -116,7 +131,7 @@ func normalizeTaskTemplateInput(in TaskTemplateInput) (TaskTemplateInput, string
 }
 
 func normalizeTaskTemplatePatch(patch TaskTemplatePatch) (TaskTemplatePatch, *string, error) {
-	if patch.Name == nil && patch.Description == nil && patch.Goal == nil && !patch.SetCategoryID && !patch.SetInterceptRules {
+	if patch.Name == nil && patch.Description == nil && patch.Goal == nil && patch.AgentProfileKey == nil && patch.AccessMode == nil && patch.CoordinationMode == nil && !patch.SetCategoryID && !patch.SetInterceptRules {
 		return patch, nil, fmt.Errorf("%w: no fields supplied", ErrTaskTemplateInvalid)
 	}
 	var nkey *string
@@ -152,6 +167,18 @@ func normalizeTaskTemplatePatch(patch TaskTemplatePatch) (TaskTemplatePatch, *st
 		}
 		patch.Goal = &goal
 	}
+	if patch.AgentProfileKey != nil {
+		key := NormalizeAgentProfileKey(*patch.AgentProfileKey)
+		patch.AgentProfileKey = &key
+	}
+	if patch.AccessMode != nil {
+		mode := strings.TrimSpace(strings.ToLower(*patch.AccessMode))
+		patch.AccessMode = &mode
+	}
+	if patch.CoordinationMode != nil {
+		mode := strings.TrimSpace(strings.ToLower(*patch.CoordinationMode))
+		patch.CoordinationMode = &mode
+	}
 	return patch, nkey, nil
 }
 
@@ -170,11 +197,14 @@ func (d *DB) CreateTaskTemplate(in TaskTemplateInput) (*TaskTemplate, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := d.AgentProfileByKey(in.AgentProfileKey); err != nil {
+		return nil, err
+	}
 	t, err := scanTaskTemplate(d.QueryRow(`
-INSERT INTO task_templates(name, nkey, description, goal, category_id, intercept_rules)
-VALUES ($1,$2,$3,$4,$5,$6)
+INSERT INTO task_templates(name, nkey, description, goal, agent_profile_key, access_mode, coordination_mode, category_id, intercept_rules)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (nkey) DO NOTHING
-RETURNING `+taskTemplateCols, in.Name, nkey, in.Description, in.Goal, in.CategoryID, rulesJSON))
+RETURNING `+taskTemplateCols, in.Name, nkey, in.Description, in.Goal, in.AgentProfileKey, in.AccessMode, in.CoordinationMode, in.CategoryID, rulesJSON))
 	if err == sql.ErrNoRows {
 		return nil, ErrTaskTemplateNameConflict
 	}
@@ -221,7 +251,8 @@ func (d *DB) UpdateTaskTemplate(id int64, in TaskTemplateInput) (*TaskTemplate, 
 		return nil, err
 	}
 	return d.PatchTaskTemplate(id, TaskTemplatePatch{
-		Name: &in.Name, Description: &in.Description, Goal: &in.Goal,
+		Name: &in.Name, Description: &in.Description, Goal: &in.Goal, AgentProfileKey: &in.AgentProfileKey,
+		AccessMode: &in.AccessMode, CoordinationMode: &in.CoordinationMode,
 	})
 }
 
@@ -237,19 +268,54 @@ func (d *DB) PatchTaskTemplate(id int64, patch TaskTemplatePatch) (*TaskTemplate
 	if err != nil {
 		return nil, err
 	}
+	if patch.AgentProfileKey != nil {
+		if _, err := d.AgentProfileByKey(*patch.AgentProfileKey); err != nil {
+			return nil, err
+		}
+	}
+	current, err := d.GetTaskTemplate(id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, ErrTaskTemplateNotFound
+	}
+	profileKey, accessMode, coordinationMode := current.AgentProfileKey, current.AccessMode, current.CoordinationMode
+	if patch.AgentProfileKey != nil {
+		profileKey = *patch.AgentProfileKey
+	}
+	if patch.AccessMode != nil {
+		accessMode = *patch.AccessMode
+	} else if patch.AgentProfileKey != nil {
+		accessMode = ""
+	}
+	if patch.CoordinationMode != nil {
+		coordinationMode = *patch.CoordinationMode
+	}
+	accessMode, coordinationMode, err = NormalizeTaskModes(profileKey, accessMode, coordinationMode)
+	if err != nil {
+		return nil, err
+	}
+	patch.AccessMode = &accessMode
+	patch.CoordinationMode = &coordinationMode
 	t, err := scanTaskTemplate(d.QueryRow(`UPDATE task_templates
 SET name=CASE WHEN $2 THEN $3::text ELSE name END,
     nkey=CASE WHEN $2 THEN $4::text ELSE nkey END,
     description=CASE WHEN $5 THEN $6::text ELSE description END,
     goal=CASE WHEN $7 THEN $8::text ELSE goal END,
-    category_id=CASE WHEN $9 THEN $10::bigint ELSE category_id END,
-    intercept_rules=CASE WHEN $11 THEN $12::jsonb ELSE intercept_rules END
+    agent_profile_key=CASE WHEN $9 THEN $10::text ELSE agent_profile_key END,
+    access_mode=$11::text,
+    coordination_mode=$12::text,
+    category_id=CASE WHEN $13 THEN $14::bigint ELSE category_id END,
+    intercept_rules=CASE WHEN $15 THEN $16::jsonb ELSE intercept_rules END
 WHERE id=$1
 RETURNING `+taskTemplateCols,
 		id,
 		patch.Name != nil, patch.Name, nkey,
 		patch.Description != nil, patch.Description,
 		patch.Goal != nil, patch.Goal,
+		patch.AgentProfileKey != nil, patch.AgentProfileKey,
+		accessMode, coordinationMode,
 		patch.SetCategoryID, patch.CategoryID,
 		patch.SetInterceptRules, rulesJSON,
 	))

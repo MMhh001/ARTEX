@@ -318,6 +318,9 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
 	}
 	_, err = tx.Exec(`UPDATE tasks current SET
  name=archived.name,remark=COALESCE(archived.remark,''),category_id=archived.category_id,description=archived.description,goal=archived.goal,
+	 agent_profile_key=COALESCE(archived.agent_profile_key,'pentest'),
+	 access_mode=COALESCE(archived.access_mode,CASE WHEN archived.agent_profile_key='vuln_research' THEN 'source_assisted' ELSE 'standard' END),
+	 coordination_mode=COALESCE(archived.coordination_mode,'orchestrated'),
  status=archived.status,paused=archived.paused,queued=false,queued_at=NULL,queue_mode='',
  llm_profile_id=archived.llm_profile_id,active_llm_profile_id=archived.active_llm_profile_id,
  llm_chain_revision=archived.llm_chain_revision,company_id=archived.company_id,parent_ref=archived.parent_ref,

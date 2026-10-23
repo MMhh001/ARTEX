@@ -33,19 +33,24 @@ import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetT
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { AssetInterceptRuleInput, TaskCategory, TaskTemplate } from "@/lib/types";
+import type { AccessMode, AgentProfile, AssetInterceptRuleInput, TaskCategory, TaskTemplate } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface TemplateDraft {
   name: string;
   description: string;
   goal: string;
+  agentProfileKey: string;
+  accessMode: AccessMode;
   categoryID: number | null;
   interceptRules: AssetInterceptRuleInput[];
 }
 
 // TemplateSeed 是「另存为模板」时从创建表单带入的初值。
-type TemplateSeed = Pick<TemplateDraft, "description" | "goal" | "categoryID" | "interceptRules">;
+type TemplateSeed = Pick<
+  TemplateDraft,
+  "description" | "goal" | "agentProfileKey" | "accessMode" | "categoryID" | "interceptRules"
+>;
 
 interface TaskTemplateManagerProps {
   open: boolean;
@@ -61,6 +66,8 @@ const emptyDraft = (): TemplateDraft => ({
   name: "",
   description: "",
   goal: "",
+  agentProfileKey: "pentest",
+  accessMode: "standard",
   categoryID: null,
   interceptRules: [],
 });
@@ -70,6 +77,8 @@ function templateDraft(template: TaskTemplate): TemplateDraft {
     name: template.name,
     description: template.description,
     goal: template.goal,
+    agentProfileKey: template.agent_profile_key,
+    accessMode: template.access_mode,
     categoryID: template.category_id ?? null,
     interceptRules: template.intercept_rules ?? [],
   };
@@ -90,6 +99,7 @@ function TaskTemplateManager({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [categories, setCategories] = React.useState<TaskCategory[]>([]);
+  const [agentProfiles, setAgentProfiles] = React.useState<AgentProfile[]>([]);
   const wasOpen = React.useRef(false);
 
   React.useEffect(() => {
@@ -98,6 +108,10 @@ function TaskTemplateManager({
       .taskCategories()
       .then(setCategories)
       .catch(() => setCategories([]));
+    api
+      .agentProfiles()
+      .then(setAgentProfiles)
+      .catch(() => setAgentProfiles([]));
   }, [open]);
 
   React.useEffect(() => {
@@ -108,6 +122,8 @@ function TaskTemplateManager({
           name: "",
           description: seed.description,
           goal: seed.goal,
+          agentProfileKey: seed.agentProfileKey,
+          accessMode: seed.accessMode,
           categoryID: seed.categoryID,
           interceptRules: seed.interceptRules,
         });
@@ -145,6 +161,9 @@ function TaskTemplateManager({
       name: draft.name.trim(),
       description: draft.description.trim(),
       goal: draft.goal.trim(),
+      agent_profile_key: draft.agentProfileKey,
+      access_mode: draft.accessMode,
+      coordination_mode: "orchestrated" as const,
       category_id: draft.categoryID,
       intercept_rules: draft.interceptRules
         .map((r) => ({ ...r, pattern: r.pattern.trim() }))
@@ -207,7 +226,9 @@ function TaskTemplateManager({
         <SheetContent className="grid h-full w-full! max-w-none! grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0 sm:w-[48rem]! sm:max-w-[48rem]!">
           <SheetHeader className="border-b px-6 py-5">
             <SheetTitle>任务模板管理</SheetTitle>
-            <SheetDescription>模板保存描述、目标、分类与任务级拦截/允许规则；修改不会影响已经创建的任务。</SheetDescription>
+            <SheetDescription>
+              模板保存任务模式、描述、目标、分类与任务级拦截/允许规则；修改不会影响已经创建的任务。
+            </SheetDescription>
           </SheetHeader>
           <div className="grid min-h-0 overflow-y-auto lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
             <div className="flex min-h-0 flex-col border-b p-3 lg:border-r lg:border-b-0">
@@ -269,6 +290,49 @@ function TaskTemplateManager({
                     onChange={(event) => updateDraft("goal", event.target.value)}
                   />
                 </Field>
+                <Field>
+                  <FieldLabel htmlFor="task-template-agent-profile">任务模式</FieldLabel>
+                  <NativeSelect
+                    id="task-template-agent-profile"
+                    className="w-full"
+                    value={draft.agentProfileKey}
+                    onChange={(event) => {
+                      const agentProfileKey = event.target.value;
+                      patchDraft({
+                        agentProfileKey,
+                        accessMode: agentProfileKey === "vuln_research" ? "source_assisted" : "standard",
+                      });
+                    }}
+                  >
+                    {(agentProfiles.length > 0
+                      ? agentProfiles
+                      : [
+                          { key: "pentest", name: "渗透测试" },
+                          { key: "vuln_research", name: "漏洞挖掘" },
+                        ]
+                    ).map((profile) => (
+                      <NativeSelectOption key={profile.key} value={profile.key}>
+                        {profile.name}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                  <FieldDescription>应用模板时同步选择对应的 Agent 组合。</FieldDescription>
+                </Field>
+                {draft.agentProfileKey === "vuln_research" && (
+                  <Field>
+                    <FieldLabel htmlFor="task-template-access-mode">漏洞挖掘访问模式</FieldLabel>
+                    <NativeSelect
+                      id="task-template-access-mode"
+                      className="w-full"
+                      value={draft.accessMode}
+                      onChange={(event) => patchDraft({ accessMode: event.target.value as AccessMode })}
+                    >
+                      <NativeSelectOption value="source_assisted">源码/制品辅助</NativeSelectOption>
+                      <NativeSelectOption value="unauthenticated">U Agent · 未认证</NativeSelectOption>
+                    </NativeSelect>
+                    <FieldDescription>U Agent 从空会话、无预置凭据的外部攻击者视角开始。</FieldDescription>
+                  </Field>
+                )}
                 <Field>
                   <FieldLabel htmlFor="task-template-category">任务分类</FieldLabel>
                   <NativeSelect
@@ -347,6 +411,8 @@ function TaskTemplateManager({
 interface TaskTemplateControlsProps {
   description: string;
   goal: string;
+  agentProfileKey: string;
+  accessMode: AccessMode;
   categoryID?: number;
   interceptRules?: AssetInterceptRuleInput[];
   selectedTemplateID: number | null;
@@ -358,6 +424,8 @@ interface TaskTemplateControlsProps {
 export function TaskTemplateControls({
   description,
   goal,
+  agentProfileKey,
+  accessMode,
   categoryID,
   interceptRules,
   selectedTemplateID,
@@ -411,7 +479,11 @@ export function TaskTemplateControls({
     }
     setTemplateInputValue(template.name);
     const hasContent = description.trim() !== "" || goal.trim() !== "";
-    const changesContent = description !== template.description || goal !== template.goal;
+    const changesContent =
+      description !== template.description ||
+      goal !== template.goal ||
+      agentProfileKey !== template.agent_profile_key ||
+      accessMode !== template.access_mode;
     if (hasContent && changesContent) {
       setPendingTemplate(template);
       return;
@@ -455,6 +527,8 @@ export function TaskTemplateControls({
                 openManager({
                   description,
                   goal,
+                  agentProfileKey,
+                  accessMode,
                   categoryID: categoryID ?? null,
                   interceptRules: interceptRules ?? [],
                 })

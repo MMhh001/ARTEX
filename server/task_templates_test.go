@@ -42,11 +42,19 @@ func TestTaskTemplateHTTPCRUD(t *testing.T) {
 	}
 
 	name := fmt.Sprintf("http-template-%d", time.Now().UnixNano())
+	code, profileList := do(http.MethodGet, "/api/agent-profiles", nil)
+	profiles, _ := profileList["profiles"].([]any)
+	if code != http.StatusOK || len(profiles) < 2 {
+		t.Fatalf("agent profiles status=%d body=%v", code, profileList)
+	}
 	code, created := do(http.MethodPost, "/api/task-templates", map[string]any{
-		"name": name, "description": "description", "goal": "goal",
+		"name": name, "description": "description", "goal": "goal", "agent_profile_key": db.VulnerabilityAgentProfileKey,
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%v", code, created)
+	}
+	if created["agent_profile_key"] != db.VulnerabilityAgentProfileKey {
+		t.Fatalf("created template profile=%v", created["agent_profile_key"])
 	}
 	id := int64(created["id"].(float64))
 	t.Cleanup(func() { _, _ = m.pg.DeleteTaskTemplate(id) })

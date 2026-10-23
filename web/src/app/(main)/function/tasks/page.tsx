@@ -125,6 +125,8 @@ import { api, type ScheduleInput } from "@/lib/api";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { type SortDirection, useStoredSortPreference } from "@/lib/sort-preference";
 import type {
+  AccessMode,
+  AgentProfile,
   AssetInterceptRuleInput,
   ChatAttachment,
   Company,
@@ -1404,6 +1406,11 @@ function TaskNameEditor({ task, onRename }: { task: Task; onRename: (task: Task,
       >
         {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
       </Link>
+      {task.agent_profile_key === "vuln_research" && (
+        <Badge variant="secondary" className="shrink-0 px-1.5 py-0 text-[10px]">
+          {task.access_mode === "unauthenticated" ? "U Agent" : "漏洞挖掘"}
+        </Badge>
+      )}
       <Button
         type="button"
         variant="ghost"
@@ -2746,6 +2753,9 @@ function DraggableCategoryTask({ task, disabled, moving }: { task: Task; disable
         </ItemDescription>
       </ItemContent>
       <ItemActions>
+        {task.agent_profile_key === "vuln_research" && (
+          <Badge variant="secondary">{task.access_mode === "unauthenticated" ? "U Agent" : "漏洞挖掘"}</Badge>
+        )}
         <StatusBadge domain="task" value={task.status} />
       </ItemActions>
     </Item>
@@ -3109,6 +3119,9 @@ function CreateTaskSheet({
   const [goal, setGoal] = React.useState("");
   const [selectedTemplateID, setSelectedTemplateID] = React.useState<number | null>(null);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [agentProfiles, setAgentProfiles] = React.useState<AgentProfile[]>([]);
+  const [agentProfileKey, setAgentProfileKey] = React.useState("pentest");
+  const [accessMode, setAccessMode] = React.useState<AccessMode>("standard");
   const [companies, setCompanies] = React.useState<Company[]>([]);
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
@@ -3148,6 +3161,10 @@ function CreateTaskSheet({
       .companies()
       .then(setCompanies)
       .catch(() => setCompanies([]));
+    api
+      .agentProfiles()
+      .then(setAgentProfiles)
+      .catch(() => setAgentProfiles([]));
   }, []);
 
   // pickFiles uploads the chosen files into this draft's staging dir and appends their
@@ -3190,6 +3207,9 @@ function CreateTaskSheet({
         categoryId: categoryID,
         description: description.trim(),
         goal: goal.trim(),
+        agentProfileKey,
+        accessMode,
+        coordinationMode: "orchestrated",
         llmProfileIds: llmProfileIDs.map(Number),
         sourceTaskIds: sourceTaskIDs,
         companyIds: companyIDs,
@@ -3207,6 +3227,8 @@ function CreateTaskSheet({
       setCategoryID(undefined);
       setDescription("");
       setGoal("");
+      setAgentProfileKey("pentest");
+      setAccessMode("standard");
       setSelectedTemplateID(null);
       setSourceTaskIDs([]);
       setCompanyIDs([]);
@@ -3263,6 +3285,8 @@ function CreateTaskSheet({
             <TaskTemplateControls
               description={description}
               goal={goal}
+              agentProfileKey={agentProfileKey}
+              accessMode={accessMode}
               categoryID={categoryID}
               interceptRules={interceptRules}
               selectedTemplateID={selectedTemplateID}
@@ -3270,12 +3294,102 @@ function CreateTaskSheet({
               onApply={(template) => {
                 setDescription(template.description);
                 setGoal(template.goal);
+                const nextProfileKey = template.agent_profile_key;
+                setAgentProfileKey(nextProfileKey);
+                setAccessMode(template.access_mode);
+                const nextProfile = agentProfiles.find((profile) => profile.key === nextProfileKey);
+                setCoverageEnabled(
+                  template.access_mode === "unauthenticated" ||
+                    (nextProfile?.default_coverage_enabled ?? nextProfileKey !== "vuln_research"),
+                );
                 setCategoryID(template.category_id ?? undefined);
                 setInterceptRules(template.intercept_rules ?? []);
                 setUploadCount(0);
               }}
               portalContainer={sheetContentRef}
             />
+            <Field>
+              <FieldLabel>任务模式</FieldLabel>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {(agentProfiles.length > 0
+                  ? agentProfiles
+                  : [
+                      {
+                        key: "pentest",
+                        name: "渗透测试",
+                        description: "面向站点、网络和服务的授权渗透测试",
+                        default_coverage_enabled: true,
+                      },
+                      {
+                        key: "vuln_research",
+                        name: "漏洞挖掘",
+                        description: "面向源码、版本和本地制品的漏洞研究与复现",
+                        default_coverage_enabled: false,
+                      },
+                    ]
+                ).map((profile) => (
+                  <button
+                    key={profile.key}
+                    type="button"
+                    className={cn(
+                      "rounded-lg border p-3 text-left transition-colors",
+                      agentProfileKey === profile.key
+                        ? "border-primary bg-primary/5 ring-1 ring-primary"
+                        : "hover:bg-muted/50",
+                    )}
+                    onClick={() => {
+                      setAgentProfileKey(profile.key);
+                      setAccessMode(profile.key === "vuln_research" ? "source_assisted" : "standard");
+                      setCoverageEnabled(profile.default_coverage_enabled);
+                    }}
+                  >
+                    <span className="block font-medium text-sm">{profile.name}</span>
+                    <span className="mt-1 block text-muted-foreground text-xs">{profile.description}</span>
+                  </button>
+                ))}
+              </div>
+              <FieldDescription>创建后固定使用所选的 Goals、Planner、Worker 与主 Agent 组合。</FieldDescription>
+            </Field>
+            {agentProfileKey === "vuln_research" && (
+              <Field>
+                <FieldLabel>漏洞挖掘访问模式</FieldLabel>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {[
+                    {
+                      key: "source_assisted" as const,
+                      name: "源码/制品辅助",
+                      description: "结合源码、版本或本地制品开展审计、复现与证据沉淀",
+                    },
+                    {
+                      key: "unauthenticated" as const,
+                      name: "U Agent · 未认证",
+                      description: "从空会话、无预置账号与凭据的外部攻击者视角开始",
+                    },
+                  ].map((mode) => (
+                    <button
+                      key={mode.key}
+                      type="button"
+                      className={cn(
+                        "rounded-lg border p-3 text-left transition-colors",
+                        accessMode === mode.key
+                          ? "border-primary bg-primary/5 ring-1 ring-primary"
+                          : "hover:bg-muted/50",
+                      )}
+                      onClick={() => {
+                        setAccessMode(mode.key);
+                        setCoverageEnabled(mode.key === "unauthenticated");
+                      }}
+                    >
+                      <span className="block font-medium text-sm">{mode.name}</span>
+                      <span className="mt-1 block text-muted-foreground text-xs">{mode.description}</span>
+                    </button>
+                  ))}
+                </div>
+                <FieldDescription>
+                  U Agent 会强制禁用预置凭据/既有登录态，并要求用全新客户端与空 Cookie Jar 独立复现。
+                </FieldDescription>
+              </Field>
+            )}
             <div className="grid gap-2">
               <Label htmlFor="name">名称（可选）</Label>
               <Input

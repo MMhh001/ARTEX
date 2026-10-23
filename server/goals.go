@@ -45,6 +45,18 @@ func (s *Server) startTaskEngine(t *Task) {
 	if ctx.Err() != nil || s.engine.IsDeleting(t.ID) {
 		return
 	}
+	// Resolve the immutable task profile before materializing goals. A missing or
+	// incomplete mapping is a configuration error, not a reason to run the legacy
+	// pentest agents or leave the task silently idle.
+	if _, err := s.agentsForTask(t); err != nil {
+		message := "Agent Profile 配置无效，任务无法启动：" + err.Error()
+		log.Printf("[agent-profile] task %s: %v", t.ID, err)
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true, Summary: message})
+		if statusErr := s.m.SetTaskStatus(t.ID, "failed"); statusErr != nil {
+			log.Printf("[agent-profile] task %s 标记失败: %v", t.ID, statusErr)
+		}
+		return
+	}
 	s.engine.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
 		Summary: "第 0 轮目标拆解"})
 	goals := s.createGoals(ctx, t, func(r db.Activity) {
@@ -410,8 +422,18 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	s.engine.BeginLLMCall(t.ID)
-	goalRuntime := s.agentsForTask(t).runtime
-	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
+	var decomposed []agent.GoalSpec
+	bundle, err := s.agentsForTask(t)
+	if err != nil {
+		log.Printf("[agent-profile] %v", err)
+	} else {
+		goalRuntime := bundle.runtime
+		policy := ""
+		if t.AccessMode == db.AccessModeUnauthenticated {
+			policy = agent.UnauthenticatedResearchPolicy
+		}
+		decomposed = agent.DecomposeGoalsWithProviderForAgentAndPolicy(ctx, goalRuntime.agentKey, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), policy, emit)
+	}
 	s.engine.EndLLMCall(t.ID)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {

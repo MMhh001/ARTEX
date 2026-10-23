@@ -1179,11 +1179,18 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const categoryID = typeof b.category_id === "number" ? b.category_id : undefined;
     const category = categoryID === undefined ? undefined : mockTaskCategories.find((item) => item.id === categoryID);
     if (categoryID !== undefined && !category) throw new Error("任务分类不存在");
+    const agentProfileKey = String(b.agent_profile_key ?? "pentest");
+    if (agentProfileKey !== "pentest" && agentProfileKey !== "vuln_research") throw new Error("任务模式不存在");
     const created: Task = {
       id,
       name: String(b.name ?? ""),
       category_id: category?.id,
       category_name: category?.name,
+      agent_profile_key: agentProfileKey,
+      access_mode: String(
+        b.access_mode ?? (agentProfileKey === "vuln_research" ? "source_assisted" : "standard"),
+      ) as Task["access_mode"],
+      coordination_mode: "orchestrated",
       description: String(b.description ?? "新任务"),
       goal: String(b.goal ?? ""),
       status: "created",
@@ -1297,6 +1304,33 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     task.category_name = category?.name;
     return task;
   }
+  if (path === "/agent-profiles" && m === "GET") {
+    return {
+      profiles: [
+        {
+          key: "pentest",
+          name: "渗透测试",
+          description: "现有授权渗透测试编排：目标拆解、规划、执行与主 Agent。",
+          builtin: true,
+          default_coverage_enabled: true,
+          roles: { goals: "goals", planner: "planner", worker: "worker", main: "mainagent" },
+        },
+        {
+          key: "vuln_research",
+          name: "漏洞挖掘",
+          description: "面向源码、版本与本地制品的漏洞研究、复现与证据沉淀。",
+          builtin: true,
+          default_coverage_enabled: false,
+          roles: {
+            goals: "vuln_goals",
+            planner: "vuln_planner",
+            worker: "vuln_worker",
+            main: "vuln_mainagent",
+          },
+        },
+      ],
+    };
+  }
   if (path === "/task-templates" && m === "GET") return { templates: mockTaskTemplates };
   if (path === "/task-templates" && m === "POST") {
     const now = new Date().toISOString();
@@ -1315,6 +1349,9 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       name,
       description,
       goal,
+      agent_profile_key: String(b.agent_profile_key ?? "pentest"),
+      access_mode: String(b.access_mode ?? "standard") as TaskTemplate["access_mode"],
+      coordination_mode: "orchestrated",
       created_at: now,
       updated_at: now,
     };
@@ -1338,6 +1375,8 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     template.name = name;
     template.description = description;
     template.goal = goal;
+    if (typeof b.agent_profile_key === "string") template.agent_profile_key = b.agent_profile_key;
+    if (typeof b.access_mode === "string") template.access_mode = b.access_mode as TaskTemplate["access_mode"];
     template.updated_at = new Date().toISOString();
     mockTaskTemplates.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
     return template;

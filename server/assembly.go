@@ -244,6 +244,35 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			log.Printf("[tools] seed %s 失败: %v", t.Name(), err)
 		}
 	}
+	// Existing databases already have tool rows, and SeedTool intentionally never
+	// overwrites their edited bindings. Add the new vuln_* identities exactly once;
+	// subsequent user changes remain authoritative.
+	if v, _, _ := pg.GetSetting("vuln_profile_tool_bindings_v1"); v != "done" {
+		migrationOK := true
+		for _, seed := range agent.BuiltinToolSeeds() {
+			for _, agentKey := range seed.Agents {
+				if strings.HasPrefix(agentKey, "vuln_") {
+					if err := pg.AddAgentToToolBinding(agentKey, []string{seed.Key}); err != nil {
+						migrationOK = false
+						log.Printf("[tools] 增加 %s → %s 绑定失败: %v", agentKey, seed.Key, err)
+					}
+				}
+			}
+		}
+		trafficKeys := make([]string, 0, len(traffic.SeedToolMetas()))
+		for _, tool := range traffic.SeedToolMetas() {
+			trafficKeys = append(trafficKeys, tool.Name())
+		}
+		if err := pg.AddAgentToToolBinding("vuln_worker", trafficKeys); err != nil {
+			migrationOK = false
+			log.Printf("[tools] 增加 vuln_worker 流量工具绑定失败: %v", err)
+		}
+		if migrationOK {
+			if err := pg.SetSetting("vuln_profile_tool_bindings_v1", "done"); err != nil {
+				log.Printf("[tools] 保存漏洞挖掘工具迁移状态失败: %v", err)
+			}
+		}
+	}
 	// bashInteractiveShellNote is appended to Bash's description ONLY for agents whose
 	// interactive_shell is on, so Bash points at shell_open for interactive programs
 	// without ever referencing a tool that isn't injected (§14.1/§14.2).

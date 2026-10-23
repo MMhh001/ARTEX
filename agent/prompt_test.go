@@ -80,3 +80,38 @@ func TestRenderSystemOverrideAndFallback(t *testing.T) {
 		t.Fatalf("worker without proxy must NOT inject trafficTool: %q", noProxy)
 	}
 }
+
+func TestVulnerabilityAgentPromptRouting(t *testing.T) {
+	t.Cleanup(func() { PromptOverride = nil })
+
+	seeds := BuiltinPromptSeeds()
+	for _, key := range []string{"vuln_goals", "vuln_planner", "vuln_worker", "vuln_mainagent"} {
+		if strings.TrimSpace(seeds[key]) == "" {
+			t.Fatalf("missing vulnerability prompt seed %q", key)
+		}
+	}
+
+	PromptOverride = func(key string) (string, bool) {
+		if key == "vuln_planner" {
+			return "VULN {{.Goal}}", true
+		}
+		return "WRONG", true
+	}
+	got := plannerSystemForAgent("vuln_planner", "audit source", "/data", "/work")
+	if !strings.HasPrefix(got, "VULN audit source") {
+		t.Fatalf("vulnerability planner did not use its own prompt key: %q", got)
+	}
+
+	worker := NewWorkerForAgentKey("vuln_worker", nil, "", "", nil, 0, 0)
+	planner := NewPlannerForAgentKey("vuln_planner", nil, "", "", nil, 0, 0)
+	main := NewMainAgentForAgentKey("vuln_mainagent", nil, "", "", nil, 0, 0)
+	if worker.agentKey != "vuln_worker" || planner.agentKey != "vuln_planner" || main.agentKey != "vuln_mainagent" {
+		t.Fatalf("agent keys not retained: worker=%q planner=%q main=%q", worker.agentKey, planner.agentKey, main.agentKey)
+	}
+	if WrapupDefault("vuln_worker") != WrapupDefault("worker") || TaskTimeoutWrapupDefault("vuln_worker") == "" {
+		t.Fatal("vulnerability worker did not inherit worker settlement safety defaults")
+	}
+	if WrapupDefault("vuln_planner") != WrapupDefault("planner") || TaskTimeoutWrapupDefault("vuln_planner") == "" {
+		t.Fatal("vulnerability planner did not inherit planner settlement safety defaults")
+	}
+}

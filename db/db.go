@@ -207,6 +207,22 @@ var builtinAgents = []builtinAgent{
 		{"ProxyAddr", "记录代理地址(驱动 if 双文案)", "127.0.0.1:8080", "runtime"},
 		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
 	}, false, nil},
+	{"vuln_goals", "漏洞挖掘·目标拆解", "goals", "把源码、版本或制品研究请求拆成独立、可验证的漏洞研究目标。", []promptVar{
+		{"EngagementDescription", "研究对象、版本与背景", "审计 example 项目 v1.2.3", "exploration"},
+	}, false, nil},
+	{"vuln_planner", "漏洞挖掘·规划", "planner", "维护漏洞假设与审计路线，只为尚未验证的高价值方向补充研究意图。", []promptVar{
+		{"Goal", "漏洞研究总目标", "发现并复现可远程触发的高危漏洞", "exploration"},
+		{"AssetSummary", "研究对象与已知材料摘要(可选)", "repo:1 version:2 artifact:1", "distilled"},
+	}, true, nil},
+	{"vuln_mainagent", "漏洞挖掘·主", "main", "漏洞研究的人机接口：观察候选、注入假设、要求复核或调整范围。", []promptVar{
+		{"Goal", "当前漏洞研究目标", "发现并复现可远程触发的高危漏洞", "exploration"},
+		{"AssetSummary", "研究对象摘要(可选)", "repository:example tag:v1.2.3", "distilled"},
+		{"FindingsSummary", "已确认漏洞摘要(可选)", "high:1 candidate:2", "distilled"},
+	}, true, nil},
+	{"vuln_worker", "漏洞挖掘·执行", "worker", "领取一条研究意图，完成代码分析或复现验证并把事实、证据和漏洞写回。", []promptVar{
+		{"ProxyAddr", "记录代理地址(动态验证时使用)", "127.0.0.1:8080", "runtime"},
+		{"WorkerName", "worker 自我标识(可选)", "worker-1", "runtime"},
+	}, true, nil},
 	// Auto:内置「平台操作」agent。不参与渗透编排循环,经对话页驱动,用工具操作平台。
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
@@ -270,6 +286,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedBuiltinSkillVisibility(); err != nil {
 		return fmt.Errorf("seed skill visibility: %w", err)
 	}
+	if err := d.seedAgentProfiles(); err != nil {
+		return fmt.Errorf("seed agent profiles: %w", err)
+	}
 	if err := d.seedDefaultInterceptRules(); err != nil {
 		return fmt.Errorf("seed intercept rules: %w", err)
 	}
@@ -322,7 +341,9 @@ ON CONFLICT DO NOTHING`, r.kind, r.pattern, r.note); err != nil {
 // declares `mcps: ScopeSentry`, which only takes effect once it's made visible and
 // that MCP is enabled/configured.
 var builtinSkillVisibility = map[string][]string{
-	"api-recon": {"auto", "pentest", "worker"},
+	"api-recon":     {"auto", "pentest", "worker"},
+	"vuln-research": {"vuln_goals", "vuln_planner", "vuln_worker", "vuln_mainagent"},
+	"vuln-unauth":   {"vuln_goals", "vuln_planner", "vuln_worker", "vuln_mainagent"},
 }
 
 // seedBuiltinSkillVisibility binds the shipped built-in skills to their default

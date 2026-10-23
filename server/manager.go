@@ -27,19 +27,22 @@ import (
 // sharing the process-wide asset store. ID is the PG task id as a string; ExpID
 // is the exploration the task owns.
 type Task struct {
-	ID           string `json:"id"`
-	ExpID        int64  `json:"exploration_id"`
-	Remark       string `json:"remark"`
-	Name         string `json:"name"` // 可选任务名称;空=未命名
-	CategoryID   *int64 `json:"category_id,omitempty"`
-	CategoryName string `json:"category_name,omitempty"`
-	PinnedAt     int64  `json:"pinned_at,omitempty"`
-	Description  string `json:"description"`
-	Goal         string `json:"goal"`
-	CreatedAt    int64  `json:"created_at"`
-	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
-	Paused       bool   `json:"paused"`
-	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+	ID               string `json:"id"`
+	ExpID            int64  `json:"exploration_id"`
+	Remark           string `json:"remark"`
+	Name             string `json:"name"` // 可选任务名称;空=未命名
+	CategoryID       *int64 `json:"category_id,omitempty"`
+	CategoryName     string `json:"category_name,omitempty"`
+	PinnedAt         int64  `json:"pinned_at,omitempty"`
+	Description      string `json:"description"`
+	Goal             string `json:"goal"`
+	AgentProfileKey  string `json:"agent_profile_key"`
+	AccessMode       string `json:"access_mode"`
+	CoordinationMode string `json:"coordination_mode"`
+	CreatedAt        int64  `json:"created_at"`
+	CompletedAt      int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
+	Paused           bool   `json:"paused"`
+	Queued           bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
 	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
 	// finer than CreatedAt so several tasks enqueued in the same second retain
 	// their real FIFO order.
@@ -839,7 +842,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		Remark:     pt.Remark,
 		CategoryID: cloneInt64Ptr(pt.CategoryID), CategoryName: pt.CategoryName,
 		PinnedAt:    unixOrZero(pt.PinnedAt),
-		Description: pt.Description, Goal: pt.Goal, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
+		Description: pt.Description, Goal: pt.Goal, AgentProfileKey: pt.AgentProfileKey, AccessMode: pt.AccessMode, CoordinationMode: pt.CoordinationMode, CreatedAt: pt.CreatedAt.Unix(), Paused: pt.Paused, Queued: pt.Queued,
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,

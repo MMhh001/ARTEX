@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
@@ -18,6 +19,7 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
+	agentKey        string
 	findingRecorder FindingRecorder
 	prov            llm.Provider
 	model           string
@@ -33,7 +35,11 @@ type MainAgent struct {
 	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
 	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	taskPolicy      string
 }
+
+// SetTaskPolicy appends a code-owned task mode boundary to every main-agent turn.
+func (m *MainAgent) SetTaskPolicy(policy string) { m.taskPolicy = strings.TrimSpace(policy) }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
 // context-compression mechanism. nil/unset = off (built-in compaction). Read per
@@ -58,7 +64,11 @@ func (m *MainAgent) maxTokens() int {
 }
 
 func NewMainAgent(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *MainAgent {
-	return &MainAgent{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns}
+	return NewMainAgentForAgentKey("mainagent", prov, model, workDir, tx, window, maxTurns)
+}
+
+func NewMainAgentForAgentKey(agentKey string, prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *MainAgent {
+	return &MainAgent{agentKey: agentKey, prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns}
 }
 
 func (m *MainAgent) SetCompactionWindowResolver(fn func() int) { m.windowFn = fn }
@@ -101,7 +111,11 @@ const mainAgentDefaultTmpl = `你是一个授权渗透测试系统的"主 agent"
 不要编造发现；只根据工具返回的真实数据回答。`
 
 func mainAgentSystem(goal, dataDir, workDir string) string {
-	body := renderSystem("mainagent", mainAgentDefaultTmpl, MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	return mainAgentSystemForAgent("mainagent", goal, dataDir, workDir)
+}
+
+func mainAgentSystemForAgent(agentKey, goal, dataDir, workDir string) string {
+	body := renderSystem(agentKey, defaultPromptForAgent(agentKey, mainAgentDefaultTmpl), MainVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 
@@ -126,12 +140,12 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
 	base := append(tsx.DropCoverageTools(tsx.MainAgentTools()), actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
-	tools, def, cleanup := AugmentTools(ctx, "mainagent", base)
+	tools, def, cleanup := AugmentTools(ctx, m.agentKey, base)
 	defer cleanup()
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(mainAgentSystem(goal, m.workDir, mainDir), def)
+	system, boundary := deferredSystem(appendTaskPolicy(mainAgentSystemForAgent(m.agentKey, goal, m.workDir, mainDir), m.taskPolicy), def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,
@@ -160,7 +174,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		Compaction:            compactionConfig(m.compactionWindow()), // long chats stay within the window
 		Todos:                 actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 		// 命中预算(步数)→ SDK 跑收尾:向用户输出一句进展总结。Prompt 与收尾轮数可后台编辑(默认 10 轮)。
-		Settlement:   wrapupSettlement("mainagent", nil),
+		Settlement:   wrapupSettlement(m.agentKey, nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
 	}

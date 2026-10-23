@@ -1911,7 +1911,12 @@ func (s *Server) restoreTasksAfterProfileDelete(pg *db.DB) {
 				// or clear the explicit chain and restore its Agent/global fallback.
 				// Resume only intents that were blocked by the exhausted chain; a
 				// paused task remains paused and terminal tasks remain immutable.
-				if !isTerminalStatus(task.lifecycleSnapshot().Status) && s.taskRuntimeAvailable(task, "planner", "worker") {
+				bundle, profileErr := s.agentsForTask(task)
+				if profileErr != nil {
+					log.Printf("[agent-profile] task %s restore after LLM profile delete: %v", task.ID, profileErr)
+				}
+				if !isTerminalStatus(task.lifecycleSnapshot().Status) && profileErr == nil &&
+					s.taskRuntimeAvailable(task, bundle.plannerRuntime.agentKey, bundle.workerRuntime.agentKey) {
 					if _, reopenErr := task.Store.ReopenIntentsByBlockedReason(db.IntentBlockedLLMQuota); reopenErr != nil {
 						log.Printf("[llm-profile] task %s reopen quota-blocked intents after profile delete: %v", task.ID, reopenErr)
 					}

@@ -254,14 +254,15 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   if (loaded && !detail) {
     return <div className="text-muted-foreground p-6 text-center text-sm">未找到 Agent：{agentKey}</div>;
   }
-  // config is meaningless for the conversational main agent and the fixed-budget
-  // goals decomposer; every other agent (workers, custom assistants) honors it.
-  const showConfig = agentKey !== "mainagent" && agentKey !== "goals";
+  const agentRole = detail?.agent?.role;
+  // config is meaningless for main agents and fixed-budget goals decomposers;
+  // use role rather than built-in key so Agent Profile variants behave identically.
+  const showConfig = agentRole ? agentRole !== "main" && agentRole !== "goals" : agentKey !== "mainagent" && agentKey !== "goals";
   // web search applies to every conversational/executing agent except the one-shot
   // goals decomposer; it's gated by the global master switch.
-  const showWebSearch = agentKey !== "goals";
+  const showWebSearch = agentRole ? agentRole !== "goals" : agentKey !== "goals";
   // interactive shell (持久 PTY 会话工具族) 同样对除 goals 外的 agent 开放;无全局门控。
-  const showInteractiveShell = agentKey !== "goals";
+  const showInteractiveShell = agentRole ? agentRole !== "goals" : agentKey !== "goals";
   // 每个 agent(含 goals/mainagent)都跑在某个 LLM 上,故「默认模型」绑定对所有 agent 开放。
   const showLLM = true;
   // triggers (P3) only attach to custom agents.

@@ -171,10 +171,14 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// that router through Agent bindings and then the global provider, so adding a
 	// first chain to a running task takes effect on its very next LLM call.
 	s.engine.SetAuthoritativeAgentResolver(func(t *Task) (*agent.Planner, *agent.Worker) {
-		if !s.taskRuntimeAvailable(t, "planner", "worker") {
+		b, err := s.agentsForTask(t)
+		if err != nil {
+			log.Printf("[agent-profile] %v", err)
 			return nil, nil
 		}
-		b := s.agentsForTask(t)
+		if !s.taskRuntimeAvailable(t, b.plannerRuntime.agentKey, b.workerRuntime.agentKey) {
+			return nil, nil
+		}
 		return b.pl, b.wk
 	})
 	// Global readiness (Ready()/llm_configured): a global active LLM provider is
@@ -733,6 +737,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/task-categories/{id}", s.pgDeleteTaskCategory)
 	mux.HandleFunc("POST /api/tasks/category/batch", s.updateTasksCategoryBatch)
 	mux.HandleFunc("GET /api/task-templates", s.pgListTaskTemplates)
+	mux.HandleFunc("GET /api/agent-profiles", s.pgListAgentProfiles)
 	mux.HandleFunc("POST /api/task-templates", s.pgCreateTaskTemplate)
 	mux.HandleFunc("PATCH /api/task-templates/{id}", s.pgUpdateTaskTemplate)
 	mux.HandleFunc("DELETE /api/task-templates/{id}", s.pgDeleteTaskTemplate)
@@ -1532,6 +1537,9 @@ type createTaskReq struct {
 	CategoryID           *int64           `json:"category_id,omitempty"`
 	Description          string           `json:"description"`
 	Goal                 string           `json:"goal"`
+	AgentProfileKey      string           `json:"agent_profile_key,omitempty"`
+	AccessMode           string           `json:"access_mode,omitempty"`
+	CoordinationMode     string           `json:"coordination_mode,omitempty"`
 	LLMProfileID         *int64           `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
 	LLMProfileIDs        []int64          `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
 	SourceTaskIDs        []string         `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
@@ -1539,7 +1547,7 @@ type createTaskReq struct {
 	TimeoutSeconds       int              `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
 	PlanHeartbeatSeconds int              `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool            `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
-	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=使用 Agent Profile 默认值。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -1607,6 +1615,8 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		Schedule: schedule,
 		Name:     strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
+		AgentProfileKey: req.AgentProfileKey,
+		AccessMode:      req.AccessMode, CoordinationMode: req.CoordinationMode,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,
 		InterceptRules:  interceptRules,
@@ -1618,6 +1628,14 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, db.ErrTaskCompanyIDsInvalid) || errors.Is(err, db.ErrTaskCompanyNotFound) {
 			writeErr(w, 400, "关联企业不存在或无效")
+			return
+		}
+		if errors.Is(err, db.ErrAgentProfileNotFound) || errors.Is(err, db.ErrAgentProfileIncomplete) {
+			writeErr(w, 400, "Agent Profile 不存在或配置不完整")
+			return
+		}
+		if errors.Is(err, db.ErrTaskModeInvalid) {
+			writeErr(w, 400, "任务访问/协作模式无效："+err.Error())
 			return
 		}
 		writeErr(w, 500, err.Error())
@@ -3862,8 +3880,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	humanTurn.MainSeg = segPtr
 	s.engine.emitActivity(t, humanTurn)
 	var ma *agent.MainAgent
-	if s.taskRuntimeAvailable(t, "mainagent") {
-		ma = s.agentsForTask(t).main
+	if bundle, err := s.agentsForTask(t); err == nil && s.taskRuntimeAvailable(t, bundle.mainRuntime.agentKey) {
+		ma = bundle.main
+	} else if err != nil {
+		log.Printf("[agent-profile] %v", err)
 	}
 	if ma != nil {
 		// Run the agent on a per-turn cancellable ctx (NOT r.Context()): the turn can
