@@ -33,13 +33,15 @@ type ToolSeed struct {
 // 原样放行、不覆盖，行为与从前一致。只有 artex 自己的领域工具入表可管。
 func builtinToolsByAgent() map[string][]actool.CoreTool {
 	ts := NewToolSet(nil, "")
+	vulnPlannerTools := append(ts.PlannerTools(), ts.hypothesisTools()...)
+	vulnWorkerTools := append(ts.WorkerTools(), ts.hypothesisTools()...)
 	return map[string][]actool.CoreTool{
 		"mainagent":      ts.MainAgentTools(),
 		"vuln_mainagent": ts.MainAgentTools(),
 		"planner":        ts.PlannerTools(),
-		"vuln_planner":   ts.PlannerTools(),
+		"vuln_planner":   vulnPlannerTools,
 		"worker":         ts.WorkerTools(),
-		"vuln_worker":    ts.WorkerTools(),
+		"vuln_worker":    vulnWorkerTools,
 		// goals（目标拆解器）默认绑 set_goals + set_constraints：靠它们把拆出的目标、
 		// 抽出的操作约束写进库。与 mainagent 共用同一受管工具，web 端可改描述/schema、按 agent 勾选。
 		"goals":      {ts.setGoals(), ts.setConstraints()},

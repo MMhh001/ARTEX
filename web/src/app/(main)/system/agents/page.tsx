@@ -37,9 +37,113 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AgentEditor } from "@/components/agent-editor";
 import { api } from "@/lib/api";
-import type { Agent } from "@/lib/types";
+import type { Agent, LLMProfile } from "@/lib/types";
+
+const ROLE_GROUPS = [
+  {
+    name: "渗透测试",
+    description: "用于 pentest Profile",
+    roles: [
+      ["goals", "目标拆解"],
+      ["planner", "规划"],
+      ["mainagent", "主 Agent"],
+      ["worker", "Worker"],
+    ],
+  },
+  {
+    name: "漏洞挖掘",
+    description: "用于漏洞挖掘及 U Agent",
+    roles: [
+      ["vuln_goals", "目标拆解"],
+      ["vuln_planner", "规划"],
+      ["vuln_mainagent", "主 Agent"],
+      ["vuln_worker", "Worker"],
+    ],
+  },
+] as const;
+
+function RoleLLMAssignment({
+  agents,
+  profiles,
+  onSaved,
+}: {
+  agents: Agent[];
+  profiles: LLMProfile[];
+  onSaved: () => void;
+}) {
+  const [savingKey, setSavingKey] = React.useState("");
+  const byKey = React.useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
+
+  async function assign(agentKey: string, value: string) {
+    setSavingKey(agentKey);
+    try {
+      await api.saveAgentConfig(agentKey, {
+        llm_profile_id: value === "__follow__" ? null : Number(value),
+      });
+      toast.success("角色模型已更新，后续 Agent 回合立即生效");
+      onSaved();
+    } catch (error) {
+      toast.error("保存角色模型失败：" + (error as Error).message);
+    } finally {
+      setSavingKey("");
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>角色模型分工</CardTitle>
+        <CardDescription>
+          给 Goals、Planner、主 Agent 和 Worker 分别绑定 LLM。角色绑定优先于任务配置链；“跟随任务”保持原行为。
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4 xl:grid-cols-2">
+        {ROLE_GROUPS.map((group) => (
+          <div key={group.name} className="grid gap-3 rounded-lg border p-4">
+            <div>
+              <p className="text-sm font-medium">{group.name}</p>
+              <p className="text-muted-foreground text-xs">{group.description}</p>
+            </div>
+            {group.roles.map(([key, label]) => {
+              const current = byKey.get(key);
+              return (
+                <div key={key} className="grid gap-1.5 sm:grid-cols-[8rem_minmax(0,1fr)] sm:items-center">
+                  <div className="min-w-0">
+                    <p className="text-sm">{label}</p>
+                    <p className="text-muted-foreground truncate font-mono text-[10px]">{key}</p>
+                  </div>
+                  <Select
+                    value={current?.llm_profile_id != null ? String(current.llm_profile_id) : "__follow__"}
+                    disabled={!current || savingKey === key}
+                    onValueChange={(value) => void assign(key, value)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__follow__">跟随任务 / 全局激活配置</SelectItem>
+                      {profiles.map((profile) => (
+                        <SelectItem key={profile.id} value={String(profile.id)}>
+                          {profile.name}（{profile.model}）{profile.is_default ? " · 默认" : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+        <p className="text-muted-foreground text-xs xl:col-span-2">
+          此处是角色级默认分工：同一 Profile 下新分出的所有 Worker 共用 Worker 模型；主 Agent、Planner 与目标拆解可使用不同模型。任务配置链仍负责未绑定角色的模型与额度故障转移。
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
 
 // AgentGridCard is one clickable tile opening the agent's editor drawer. Custom
 // (non-builtin) agents get a delete button.
@@ -208,10 +312,12 @@ function CreateAgentDialog({ onCreated }: { onCreated: (key: string) => void }) 
 
 export default function AgentsPage() {
   const [agents, setAgents] = React.useState<Agent[]>([]);
+  const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [editKey, setEditKey] = React.useState<string | null>(null);
 
   const reload = React.useCallback(() => {
     api.agents().then(setAgents).catch(() => setAgents([]));
+    api.llmProfiles().then(setProfiles).catch(() => setProfiles([]));
   }, []);
   React.useEffect(() => {
     reload();
@@ -235,6 +341,8 @@ export default function AgentsPage() {
           }}
         />
       </div>
+
+      <RoleLLMAssignment agents={agents} profiles={profiles} onSaved={reload} />
 
       <Card>
         <CardHeader>

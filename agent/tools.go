@@ -67,9 +67,13 @@ type ToolSet struct {
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
 	ownerNode int64
-	GoalMet   bool
-	Reason    string
-	writes    WriteCounts
+	// requireIndependentFinding is enabled by U-Agent roles. A finding can only be
+	// committed from the system-created independent-review intent after its linked
+	// hypothesis reaches independently_reproduced.
+	requireIndependentFinding bool
+	GoalMet                   bool
+	Reason                    string
+	writes                    WriteCounts
 	// killWork, if set, terminates a running work by intent id (engine callback,
 	// wired by the planner). nil = the kill_work tool reports unavailable.
 	killWork func(intentID int64) error
@@ -367,6 +371,23 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		gsum = append(gsum, map[string]any{"id": g.ID, "state": g.State, "text": p["text"]})
 	}
 	out["goals"] = gsum
+	// U-Agent hypotheses are durable, structured research state. Keep the overview
+	// concise; node_detail remains the source for the complete evidence/call chain.
+	hypotheses, _ := t.ts.ListByKind(db.KindHypothesis, 500)
+	hypothesisSummaries := make([]map[string]any, 0, 20)
+	for _, hypothesis := range hypotheses {
+		hypothesisSummaries = append(hypothesisSummaries, hypothesisSummary(hypothesis))
+		if len(hypothesisSummaries) == 20 {
+			break
+		}
+	}
+	out["hypotheses"] = hypothesisSummaries
+	if checkpoint, err := t.ts.ResearchCheckpoint(); err == nil && checkpoint != nil {
+		var snapshot map[string]any
+		if json.Unmarshal(checkpoint.Payload, &snapshot) == nil {
+			out["research_checkpoint"] = snapshot
+		}
+	}
 	// hints: 人类/主 agent 通过 add_hint 挂上图的战略提示；folded in so the
 	// planner reads them every round when generating intents (否则只写不读).
 	hints, _ := t.ts.ListByKind(db.KindHint, 50)
@@ -1243,6 +1264,17 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if t.ts == nil {
 			return actool.Errorf("report_finding 需要任务上下文；平台对话请通过 add_task_hint 向对应任务交接漏洞，并在提示中携带已有的 traffic_refs，由任务 Agent 登记。已登记漏洞可用 bind_finding_traffic 补绑。"), nil
 		}
+		var err error
+		var verifiedHypothesis *db.Node
+		if t.requireIndependentFinding {
+			if pid(a.IntentID) != t.ownerNode {
+				return actool.Errorf("U-Agent 上报必须引用当前独立复核意图"), nil
+			}
+			verifiedHypothesis, err = t.independentlyVerifiedHypothesisForOwner()
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+		}
 		// Auto-binding off: ignore the evidence params instead of rejecting the call.
 		// stripTrafficParameters already removes them from the advertised schema, but
 		// models routinely emit fields anyway — failing here would discard a confirmed
@@ -1269,6 +1301,11 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		}
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
+		}
+		if verifiedHypothesis != nil {
+			if err := t.ts.Link(verifiedHypothesis.ID, db.RelProves, recorded.NodeID); err != nil {
+				return actool.Errorf(fmt.Sprintf("finding #%d 已保存，但独立复核血缘关联失败: %v", recorded.NodeID, err)), nil
+			}
 		}
 		if t.notifyFinding != nil {
 			iid := input.IntentID

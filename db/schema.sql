@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
-    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest')),
+    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest','hypothesis','checkpoint')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
@@ -189,7 +189,9 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
         (kind='hint'    AND state IN ('active','consumed')) OR
-        (kind='digest'  AND state IN ('active','superseded'))
+        (kind='digest'  AND state IN ('active','superseded')) OR
+        (kind='hypothesis' AND state IN ('suspected','reachable','controllable','boundary_broken','reproduced','independently_reproduced','rejected','blocked')) OR
+        (kind='checkpoint' AND state IN ('active'))
     )
 );
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
@@ -200,22 +202,23 @@ ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS delete_reason TEXT;
 -- a node most recently went from "has a live downstream branch" to none (NULL = hot).
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
--- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
+-- Extend the node kind constraint for structured vulnerability research records.
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='exploration_nodes'::regclass
           AND conname='ck_node_kind'
-          AND pg_get_constraintdef(oid) NOT LIKE '%digest%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%hypothesis%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%checkpoint%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_kind;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_kind
-            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest'));
+            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest','hypothesis','checkpoint'));
     END IF;
 END $$;
--- ck_node_state: recreate when it lacks the 'paused' (older), 'superseded' (digest rev),
--- or 'deleted' (intent soft-delete rev) branches.
+-- Recreate when the constraint lacks any state introduced by prior migrations or
+-- the hypothesis/checkpoint nodes introduced by structured research handoffs.
 DO $$
 BEGIN
     IF EXISTS (
@@ -224,7 +227,9 @@ BEGIN
           AND conname='ck_node_state'
           AND (pg_get_constraintdef(oid) NOT LIKE '%paused%'
                OR pg_get_constraintdef(oid) NOT LIKE '%superseded%'
-               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%')
+               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%independently_reproduced%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%checkpoint%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
@@ -234,11 +239,14 @@ BEGIN
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed')) OR
-            (kind='digest'  AND state IN ('active','superseded'))
+            (kind='digest'  AND state IN ('active','superseded')) OR
+            (kind='hypothesis' AND state IN ('suspected','reachable','controllable','boundary_broken','reproduced','independently_reproduced','rejected','blocked')) OR
+            (kind='checkpoint' AND state IN ('active'))
         );
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_expnodes_part     ON exploration_nodes(exploration_id, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_expnodes_checkpoint ON exploration_nodes(exploration_id) WHERE kind='checkpoint';
 CREATE INDEX IF NOT EXISTS idx_expnodes_frontier ON exploration_nodes(exploration_id, priority DESC)
     WHERE kind='intent' AND state='open';
 DROP TRIGGER IF EXISTS trg_expnodes_upd ON exploration_nodes;

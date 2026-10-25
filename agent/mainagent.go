@@ -125,6 +125,7 @@ func mainAgentSystemForAgent(agentKey, goal, dataDir, workDir string) string {
 // worker/planner sessions — not just the final answer.
 func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal, notifyHint func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
+	tsx.requireIndependentFinding = m.agentKey == "vuln_mainagent"
 	tsx.SetFindingRecorder(m.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -145,7 +146,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	mainDir := ensureRunDir(m.workDir, taskID, 0)
 	ctx = intercept.WithReviewWorkingDirectory(ctx, mainDir)
-	system, boundary := deferredSystem(appendTaskPolicy(mainAgentSystemForAgent(m.agentKey, goal, m.workDir, mainDir), m.taskPolicy), def)
+	sysBody := mainAgentSystemForAgent(m.agentKey, goal, m.workDir, mainDir)
+	if m.agentKey == "vuln_mainagent" {
+		sysBody += vulnMainResearchPolicy
+	}
+	system, boundary := deferredSystem(appendTaskPolicy(sysBody, m.taskPolicy), def)
 	opts := agentcore.Options{
 		Provider:        m.prov,
 		SystemPrompt:    system,

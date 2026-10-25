@@ -7,6 +7,7 @@ import {
   ArrowUpIcon,
   ArrowUpToLineIcon,
   BugIcon,
+  ClipboardCheckIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CompassIcon,
@@ -90,10 +91,22 @@ const KIND_META: Record<string, KindMeta> = {
     dot: "bg-teal-500",
     chip: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
   },
+  hypothesis: {
+    label: "漏洞假设",
+    icon: LightbulbIcon,
+    dot: "bg-violet-500",
+    chip: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
+  },
+  checkpoint: {
+    label: "研究检查点",
+    icon: ClipboardCheckIcon,
+    dot: "bg-cyan-600",
+    chip: "bg-cyan-500/15 text-cyan-700 dark:text-cyan-400",
+  },
 };
 
 // 可筛选的类型。起点(fact/state=origin)不单独列,它跟着「事实」一起过滤。
-const FILTER_KINDS: ExploreKind[] = ["goal", "intent", "fact", "finding", "hint", "digest"];
+const FILTER_KINDS: ExploreKind[] = ["goal", "intent", "fact", "finding", "hint", "digest", "hypothesis", "checkpoint"];
 
 const REL_LABEL: Record<string, string> = {
   spawns: "派生",
@@ -123,6 +136,17 @@ const STATE_META: Record<string, Record<string, { label: string; tone: Tone }>> 
     active: { label: "生效中", tone: "green" },
     superseded: { label: "已替代", tone: "slate" },
   },
+  hypothesis: {
+    suspected: { label: "候选", tone: "violet" },
+    reachable: { label: "入口可达", tone: "blue" },
+    controllable: { label: "输入可控", tone: "blue" },
+    boundary_broken: { label: "边界突破", tone: "amber" },
+    reproduced: { label: "待独立复核", tone: "amber" },
+    independently_reproduced: { label: "独立复现", tone: "red" },
+    rejected: { label: "已排除", tone: "slate" },
+    blocked: { label: "受阻", tone: "slate" },
+  },
+  checkpoint: { active: { label: "已保存", tone: "blue" } },
 };
 
 // 任务根是 state=origin 的 fact,播报里读作「起点」。
@@ -139,6 +163,8 @@ const SUMMARY_FIELDS: Record<string, string[]> = {
   finding: ["name", "summary"],
   hint: ["text", "summary"],
   digest: ["body", "summary"],
+  hypothesis: ["title", "hypothesis"],
+  checkpoint: ["summary"],
 };
 
 function summaryOf(n: TaskNode): string {

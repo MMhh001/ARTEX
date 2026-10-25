@@ -273,6 +273,34 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			}
 		}
 	}
+	// Structured U-Agent hypothesis lifecycle tools were added after existing
+	// installations may already have completed v1. Bind only these new tools and
+	// only to the two research roles; preserve all user-managed bindings otherwise.
+	if v, _, _ := pg.GetSetting("vuln_research_hypothesis_tools_v1"); v != "done" {
+		allowed := map[string]bool{
+			"create_vulnerability_hypothesis": true,
+			"update_vulnerability_hypothesis": true,
+			"list_vulnerability_hypotheses":   true,
+		}
+		keys := make([]string, 0, len(allowed))
+		for _, seed := range agent.BuiltinToolSeeds() {
+			if allowed[seed.Key] {
+				keys = append(keys, seed.Key)
+			}
+		}
+		migrationOK := true
+		for _, agentKey := range []string{"vuln_planner", "vuln_worker"} {
+			if err := pg.AddAgentToToolBinding(agentKey, keys); err != nil {
+				migrationOK = false
+				log.Printf("[tools] 增加漏洞假设工具绑定 %s 失败: %v", agentKey, err)
+			}
+		}
+		if migrationOK {
+			if err := pg.SetSetting("vuln_research_hypothesis_tools_v1", "done"); err != nil {
+				log.Printf("[tools] 保存漏洞假设工具迁移状态失败: %v", err)
+			}
+		}
+	}
 	// bashInteractiveShellNote is appended to Bash's description ONLY for agents whose
 	// interactive_shell is on, so Bash points at shell_open for interactive programs
 	// without ever referencing a tool that isn't injected (§14.1/§14.2).

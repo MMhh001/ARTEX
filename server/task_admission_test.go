@@ -640,6 +640,72 @@ func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
 	}
 }
 
+func TestTaskLLMResolutionUsesSelectedAgentProfileRoles(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) - skipping", err)
+	}
+	defer m.Close()
+
+	stamp := time.Now().UnixNano()
+	mainID, err := m.pg.SaveProfile(&db.LLMProfile{
+		Name: fmt.Sprintf("vuln-main-resolution-%d", stamp), Format: "openai",
+		Model: "glm-role-model", APIKey: "test-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerID, err := m.pg.SaveProfile(&db.LLMProfile{
+		Name: fmt.Sprintf("vuln-worker-resolution-%d", stamp), Format: "openai",
+		Model: "deepseek-role-model", APIKey: "test-key",
+	})
+	if err != nil {
+		_ = m.pg.DeleteProfile(mainID)
+		t.Fatal(err)
+	}
+	mainAgent, _ := m.pg.GetAgentByKey("vuln_mainagent")
+	workerAgent, _ := m.pg.GetAgentByKey("vuln_worker")
+	oldMain, oldWorker := mainAgent.LLMProfileID, workerAgent.LLMProfileID
+	if err := m.pg.SetAgentLLMProfile("vuln_mainagent", &mainID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.pg.SetAgentLLMProfile("vuln_worker", &workerID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := m.CreateTaskWithOptions("vulnerability role resolution", "use selected profile roles", db.TaskCreateOptions{
+		AgentProfileKey: db.VulnerabilityAgentProfileKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{})
+		_ = m.pg.SetAgentLLMProfile("vuln_mainagent", oldMain)
+		_ = m.pg.SetAgentLLMProfile("vuln_worker", oldWorker)
+		_ = m.pg.DeleteProfile(mainID)
+		_ = m.pg.DeleteProfile(workerID)
+	}()
+
+	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/llm/resolution", nil)
+	req.SetPathValue("id", task.ID)
+	rec := httptest.NewRecorder()
+	s.taskLLMResolutionHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var got map[string]taskLLMResolution
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["mainagent"].Model != "glm-role-model" || got["mainagent"].Source != "agent_binding" {
+		t.Fatalf("main resolution=%+v", got["mainagent"])
+	}
+	if got["worker"].Model != "deepseek-role-model" || got["worker"].Source != "agent_binding" {
+		t.Fatalf("worker resolution=%+v", got["worker"])
+	}
+}
+
 func TestTaskLLMResolutionReportsDatabaseFailure(t *testing.T) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {

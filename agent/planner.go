@@ -372,6 +372,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
+	tsx.requireIndependentFinding = p.agentKey == "vuln_planner"
 	tsx.SetFindingRecorder(p.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -385,7 +386,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
+	domainTools := tsx.DropCoverageTools(tsx.PlannerTools())
+	if p.agentKey == "vuln_planner" {
+		domainTools = append(domainTools, tsx.hypothesisTools()...)
+	}
+	base := append(domainTools, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, p.agentKey, base)
 	defer cleanup()
@@ -404,6 +409,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
 	sysBody := plannerSystemForAgent(p.agentKey, goal, p.workDir, taskDir)
+	if p.agentKey == "vuln_planner" {
+		sysBody += vulnPlannerResearchPolicy
+	}
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
@@ -483,5 +491,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 				emit(r)
 			}
 		})
+	if p.agentKey == "vuln_planner" {
+		if checkpointErr := tsx.saveResearchCheckpoint(); checkpointErr != nil && err == nil {
+			err = fmt.Errorf("save vulnerability research checkpoint: %w", checkpointErr)
+		}
+	}
 	return tsx.GoalMet, tsx.Reason, err
 }
