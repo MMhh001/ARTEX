@@ -42,6 +42,9 @@ type TaskDTO struct {
 	PinnedAt           string             `json:"pinned_at,omitempty"`
 	Description        string             `json:"description"`
 	Goal               string             `json:"goal"`
+	AgentProfileKey    string             `json:"agent_profile_key"`
+	AccessMode         string             `json:"access_mode"`
+	CoordinationMode   string             `json:"coordination_mode"`
 	Status             string             `json:"status"` // created | running | paused | done | failed
 	CreatedAt          string             `json:"created_at"`
 	CreatedUnix        int64              `json:"created_unix"`       // created_at as unix seconds (for run-duration calc)
@@ -123,6 +126,9 @@ func taskDTO(t *Task, status string) TaskDTO {
 		PinnedAt:           completedRFC(lifecycle.PinnedAt),
 		Description:        t.Description,
 		Goal:               t.Goal,
+		AgentProfileKey:    t.AgentProfileKey,
+		AccessMode:         t.AccessMode,
+		CoordinationMode:   t.CoordinationMode,
 		Status:             status,
 		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
 		CreatedUnix:        t.CreatedAt,

@@ -232,6 +232,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if err := pg.SeedTool(s.Key, s.Desc, schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
+		if s.Key == "create_vulnerability_hypothesis" || s.Key == "update_vulnerability_hypothesis" {
+			if err := pg.MergeToolSchemaProperties(s.Key, schema); err != nil {
+				log.Printf("[tools] merge %s research schema failed: %v", s.Key, err)
+			}
+		}
 	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability
@@ -242,6 +247,79 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		schema, _ := json.Marshal(t.InputSchema())
 		if err := pg.SeedTool(t.Name(), t.Description(), schema, trafficAgents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", t.Name(), err)
+		}
+	}
+	// Existing databases already have tool rows, and SeedTool intentionally never
+	// overwrites their edited bindings. Add the new vuln_* identities exactly once;
+	// subsequent user changes remain authoritative.
+	if v, _, _ := pg.GetSetting("vuln_profile_tool_bindings_v1"); v != "done" {
+		migrationOK := true
+		for _, seed := range agent.BuiltinToolSeeds() {
+			for _, agentKey := range seed.Agents {
+				if strings.HasPrefix(agentKey, "vuln_") {
+					if err := pg.AddAgentToToolBinding(agentKey, []string{seed.Key}); err != nil {
+						migrationOK = false
+						log.Printf("[tools] 增加 %s → %s 绑定失败: %v", agentKey, seed.Key, err)
+					}
+				}
+			}
+		}
+		trafficKeys := make([]string, 0, len(traffic.SeedToolMetas()))
+		for _, tool := range traffic.SeedToolMetas() {
+			trafficKeys = append(trafficKeys, tool.Name())
+		}
+		if err := pg.AddAgentToToolBinding("vuln_worker", trafficKeys); err != nil {
+			migrationOK = false
+			log.Printf("[tools] 增加 vuln_worker 流量工具绑定失败: %v", err)
+		}
+		if migrationOK {
+			if err := pg.SetSetting("vuln_profile_tool_bindings_v1", "done"); err != nil {
+				log.Printf("[tools] 保存漏洞挖掘工具迁移状态失败: %v", err)
+			}
+		}
+	}
+	// Structured U-Agent hypothesis lifecycle tools were added after existing
+	// installations may already have completed v1. Bind only these new tools and
+	// only to the two research roles; preserve all user-managed bindings otherwise.
+	if v, _, _ := pg.GetSetting("vuln_research_hypothesis_tools_v1"); v != "done" {
+		allowed := map[string]bool{
+			"create_vulnerability_hypothesis": true,
+			"update_vulnerability_hypothesis": true,
+			"list_vulnerability_hypotheses":   true,
+		}
+		keys := make([]string, 0, len(allowed))
+		for _, seed := range agent.BuiltinToolSeeds() {
+			if allowed[seed.Key] {
+				keys = append(keys, seed.Key)
+			}
+		}
+		migrationOK := true
+		for _, agentKey := range []string{"vuln_planner", "vuln_worker"} {
+			if err := pg.AddAgentToToolBinding(agentKey, keys); err != nil {
+				migrationOK = false
+				log.Printf("[tools] 增加漏洞假设工具绑定 %s 失败: %v", agentKey, err)
+			}
+		}
+		if migrationOK {
+			if err := pg.SetSetting("vuln_research_hypothesis_tools_v1", "done"); err != nil {
+				log.Printf("[tools] 保存漏洞假设工具迁移状态失败: %v", err)
+			}
+		}
+	}
+	// The environment preflight tool was added after the original vulnerability
+	// profile migration had completed in existing installations.
+	if v, _, _ := pg.GetSetting("vuln_research_preflight_v1"); v != "done" {
+		migrationOK := true
+		for _, agentKey := range []string{"vuln_planner", "vuln_worker"} {
+			if err := pg.AddAgentToToolBinding(agentKey, []string{"record_research_preflight"}); err != nil {
+				migrationOK = false
+				log.Printf("[tools] 增加漏洞研究预检工具绑定 %s 失败: %v", agentKey, err)
+			}
+		}
+		if migrationOK {
+			if err := pg.SetSetting("vuln_research_preflight_v1", "done"); err != nil {
+				log.Printf("[tools] 保存漏洞研究预检工具迁移状态失败: %v", err)
+			}
 		}
 	}
 	// bashInteractiveShellNote is appended to Bash's description ONLY for agents whose

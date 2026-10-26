@@ -11,22 +11,25 @@ import (
 
 // Task is a row in the task registry (1:1 with an exploration).
 type Task struct {
-	ID            int64      `json:"id"`
-	Name          string     `json:"name"` // 可选任务名称;空=未命名
-	Remark        string     `json:"remark"`
-	CategoryID    *int64     `json:"category_id,omitempty"`
-	CategoryName  string     `json:"category_name,omitempty"`
-	Pinned        bool       `json:"pinned"`
-	PinnedAt      *time.Time `json:"pinned_at,omitempty"`
-	Description   string     `json:"description"`
-	Goal          string     `json:"goal"`
-	ExplorationID int64      `json:"exploration_id"`
-	Status        string     `json:"status"`
-	Paused        bool       `json:"paused"`
-	Queued        bool       `json:"queued"`
-	QueuedAt      *time.Time `json:"queued_at,omitempty"`
-	QueueMode     string     `json:"queue_mode,omitempty"`
-	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
+	ID               int64      `json:"id"`
+	Name             string     `json:"name"` // 可选任务名称;空=未命名
+	Remark           string     `json:"remark"`
+	CategoryID       *int64     `json:"category_id,omitempty"`
+	CategoryName     string     `json:"category_name,omitempty"`
+	Pinned           bool       `json:"pinned"`
+	PinnedAt         *time.Time `json:"pinned_at,omitempty"`
+	Description      string     `json:"description"`
+	Goal             string     `json:"goal"`
+	AgentProfileKey  string     `json:"agent_profile_key"`
+	AccessMode       string     `json:"access_mode"`
+	CoordinationMode string     `json:"coordination_mode"`
+	ExplorationID    int64      `json:"exploration_id"`
+	Status           string     `json:"status"`
+	Paused           bool       `json:"paused"`
+	Queued           bool       `json:"queued"`
+	QueuedAt         *time.Time `json:"queued_at,omitempty"`
+	QueueMode        string     `json:"queue_mode,omitempty"`
+	LLMProfileID     *int64     `json:"llm_profile_id,omitempty"`
 	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
 	// for ActiveLLMProfileID while older API clients still send one profile id.
 	LLMProfileIDs      []int64    `json:"llm_profile_ids,omitempty"`
@@ -151,10 +154,13 @@ type TaskCreateOptions struct {
 	SourceTaskIDs        []int64
 	CompanyIDs           []int64
 	LLMProfileIDs        []int64
+	AgentProfileKey      string
+	AccessMode           string
+	CoordinationMode     string
 	TimeoutSeconds       int
 	PlanHeartbeatSeconds int
-	// CoverageEnabled 是「资产覆盖度功能」开关;nil=默认开(true)，让不关心该开关的创建
-	// 路径(编排 spawn、老 API)沿用原行为。仅 web 创建任务时可显式传 false 关闭。
+	// CoverageEnabled 是「资产覆盖度功能」开关；nil=使用 Agent Profile 的默认值
+	//（pentest=true、vuln_research=false）。调用方仍可显式覆盖。
 	CoverageEnabled *bool
 	// InterceptRules 是任务级资产拦截规则,创建时随任务在同一事务内写入 task_intercept_rules。
 	InterceptRules []TaskInterceptRuleInput
@@ -171,6 +177,15 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	opts.CompanyIDs = companyIDs
+	profile, err := d.AgentProfileByKey(opts.AgentProfileKey)
+	if err != nil {
+		return nil, err
+	}
+	opts.AgentProfileKey = profile.Key
+	opts.AccessMode, opts.CoordinationMode, err = NormalizeTaskModes(profile.Key, opts.AccessMode, opts.CoordinationMode)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -199,7 +214,13 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		opts.TimeoutSeconds = 0
 	}
 	opts.PlanHeartbeatSeconds = normalizeHeartbeat(opts.PlanHeartbeatSeconds)
-	coverageEnabled := opts.CoverageEnabled == nil || *opts.CoverageEnabled
+	coverageEnabled := profile.DefaultCoverageEnabled
+	if opts.AccessMode == AccessModeUnauthenticated {
+		coverageEnabled = true
+	}
+	if opts.CoverageEnabled != nil {
+		coverageEnabled = *opts.CoverageEnabled
+	}
 	var categoryName string
 	if opts.CategoryID != nil {
 		if *opts.CategoryID <= 0 {
@@ -219,7 +240,7 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 	}
 	t := &Task{
 		Name: opts.Name, CategoryID: opts.CategoryID, CategoryName: categoryName,
-		Description: description, Goal: goal, ExplorationID: expID,
+		Description: description, Goal: goal, AgentProfileKey: profile.Key, AccessMode: opts.AccessMode, CoordinationMode: opts.CoordinationMode, ExplorationID: expID,
 		LLMProfileID: active, ActiveLLMProfileID: active,
 		LLMProfileIDs:  append([]int64(nil), opts.LLMProfileIDs...),
 		SourceTaskIDs:  append([]int64(nil), opts.SourceTaskIDs...),
@@ -228,9 +249,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		CoverageEnabled: coverageEnabled,
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
-VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9)
-RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
+	INSERT INTO tasks(name, category_id, description, goal, agent_profile_key, access_mode, coordination_mode, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$10,$11,$12)
+	RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, profile.Key, opts.AccessMode, opts.CoordinationMode, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
@@ -363,11 +384,11 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), remark, category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
+	description, goal, COALESCE(agent_profile_key,'pentest'), COALESCE(access_mode,'standard'), COALESCE(coordination_mode,'orchestrated'), exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.Remark, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.Remark, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.AgentProfileKey, &t.AccessMode, &t.CoordinationMode, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt); err != nil {
 		return nil, err
 	}
 	t.Pinned = t.PinnedAt != nil

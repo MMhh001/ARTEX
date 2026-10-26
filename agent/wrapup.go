@@ -26,17 +26,23 @@ var WrapupMaxTurnsOverride func(agentKey string) (int, bool)
 // 内置默认收尾提示词,按 agent key 索引。worker 复用历史上硬编码的 settleWrapUpPrompt
 // (定义在 worker.go),planner/mainagent 各有一版;未命中的(自定义 agent)走通用兜底。
 var wrapupDefaults = map[string]string{
-	"worker":    settleWrapUpPrompt,
-	"planner":   plannerWrapUpDefault,
-	"mainagent": mainAgentWrapUpDefault,
+	"worker":         settleWrapUpPrompt,
+	"planner":        plannerWrapUpDefault,
+	"mainagent":      mainAgentWrapUpDefault,
+	"vuln_worker":    settleWrapUpPrompt,
+	"vuln_planner":   plannerWrapUpDefault,
+	"vuln_mainagent": mainAgentWrapUpDefault,
 }
 
 // wrapupTurnDefaults: 各 agent 收尾阶段【自身】的轮数预算内置默认(可被后台 >0 覆盖)。
 // 均给 10 轮,保证收尾阶段有足够步数落库。未命中走 genericWrapupTurns。
 var wrapupTurnDefaults = map[string]int{
-	"worker":    10,
-	"planner":   10,
-	"mainagent": 10,
+	"worker":         10,
+	"planner":        10,
+	"mainagent":      10,
+	"vuln_worker":    10,
+	"vuln_planner":   10,
+	"vuln_mainagent": 10,
 }
 
 const genericWrapupTurns = 10
@@ -113,8 +119,10 @@ var (
 )
 
 var taskTimeoutWrapupDefaults = map[string]string{
-	"worker":  workerTaskTimeoutDefault,
-	"planner": plannerTaskTimeoutDefault,
+	"worker":       workerTaskTimeoutDefault,
+	"planner":      plannerTaskTimeoutDefault,
+	"vuln_worker":  workerTaskTimeoutDefault,
+	"vuln_planner": plannerTaskTimeoutDefault,
 }
 
 const workerTaskTimeoutDefault = "**整个任务已到达超时上限，即将结束**（不是你这次 run 的预算，是整场探索到点了）。这是最后机会：(1) 把你已识别但还没写回的内容【全部】落库——新资产 insert_assets、探索结论/事实 record_fact、确认漏洞 report_finding；(2) 不要再启动任何新命令/探测；(3) **最后单独用一句话纯文本**总结你在本意图上的关键结论。"

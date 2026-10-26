@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
-    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest')),
+    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest','hypothesis','checkpoint')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
@@ -189,7 +189,9 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
         (kind='hint'    AND state IN ('active','consumed')) OR
-        (kind='digest'  AND state IN ('active','superseded'))
+        (kind='digest'  AND state IN ('active','superseded')) OR
+        (kind='hypothesis' AND state IN ('suspected','reachable','controllable','boundary_broken','reproduced','independently_reproduced','rejected','blocked')) OR
+        (kind='checkpoint' AND state IN ('active'))
     )
 );
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
@@ -200,22 +202,23 @@ ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS delete_reason TEXT;
 -- a node most recently went from "has a live downstream branch" to none (NULL = hot).
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS content_version  INT    NOT NULL DEFAULT 0;
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS cold_since_round BIGINT;
--- ck_node_kind: existing installs predate the 'digest' kind — recreate to allow it.
+-- Extend the node kind constraint for structured vulnerability research records.
 DO $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid='exploration_nodes'::regclass
           AND conname='ck_node_kind'
-          AND pg_get_constraintdef(oid) NOT LIKE '%digest%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%hypothesis%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%checkpoint%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_kind;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_kind
-            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest'));
+            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest','hypothesis','checkpoint'));
     END IF;
 END $$;
--- ck_node_state: recreate when it lacks the 'paused' (older), 'superseded' (digest rev),
--- or 'deleted' (intent soft-delete rev) branches.
+-- Recreate when the constraint lacks any state introduced by prior migrations or
+-- the hypothesis/checkpoint nodes introduced by structured research handoffs.
 DO $$
 BEGIN
     IF EXISTS (
@@ -224,7 +227,9 @@ BEGIN
           AND conname='ck_node_state'
           AND (pg_get_constraintdef(oid) NOT LIKE '%paused%'
                OR pg_get_constraintdef(oid) NOT LIKE '%superseded%'
-               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%')
+               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%independently_reproduced%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%checkpoint%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
@@ -234,11 +239,14 @@ BEGIN
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed')) OR
-            (kind='digest'  AND state IN ('active','superseded'))
+            (kind='digest'  AND state IN ('active','superseded')) OR
+            (kind='hypothesis' AND state IN ('suspected','reachable','controllable','boundary_broken','reproduced','independently_reproduced','rejected','blocked')) OR
+            (kind='checkpoint' AND state IN ('active'))
         );
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_expnodes_part     ON exploration_nodes(exploration_id, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_expnodes_checkpoint ON exploration_nodes(exploration_id) WHERE kind='checkpoint';
 CREATE INDEX IF NOT EXISTS idx_expnodes_frontier ON exploration_nodes(exploration_id, priority DESC)
     WHERE kind='intent' AND state='open';
 DROP TRIGGER IF EXISTS trg_expnodes_upd ON exploration_nodes;
@@ -798,6 +806,59 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS llm_profile_id BIGINT REFERENCES llm
 -- run_seconds 单次 run 墙钟默认 600→1200:只改列默认(影响将来新插入的行),不动旧库存量行。
 ALTER TABLE agents ALTER COLUMN run_seconds SET DEFAULT 1200;
 CREATE INDEX IF NOT EXISTS idx_agents_llm_profile ON agents(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
+
+-- Task-level Agent profiles map the engine's four fixed execution roles to
+-- concrete, independently configurable Agent rows. Profiles are immutable for a
+-- task after creation; this keeps long-running planner/worker sessions stable.
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    key                      TEXT PRIMARY KEY CHECK (key ~ '^[a-z][a-z0-9_]*$'),
+    name                     TEXT NOT NULL,
+    description              TEXT NOT NULL DEFAULT '',
+    builtin                  BOOLEAN NOT NULL DEFAULT true,
+    default_coverage_enabled BOOLEAN NOT NULL DEFAULT true,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO agent_profiles(key,name,description,builtin,default_coverage_enabled) VALUES
+    ('pentest','渗透测试','现有授权渗透测试编排：目标拆解、规划、执行与主 Agent。',true,true),
+    ('vuln_research','漏洞挖掘','面向源码、版本与本地制品的漏洞研究、复现与证据沉淀。',true,false)
+ON CONFLICT (key) DO UPDATE SET
+    name=EXCLUDED.name,
+    description=EXCLUDED.description,
+    builtin=EXCLUDED.builtin,
+    default_coverage_enabled=EXCLUDED.default_coverage_enabled;
+
+CREATE TABLE IF NOT EXISTS agent_profile_roles (
+    profile_key TEXT NOT NULL REFERENCES agent_profiles(key) ON DELETE CASCADE,
+    role        TEXT NOT NULL CHECK (role IN ('goals','planner','worker','main')),
+    agent_key   TEXT NOT NULL REFERENCES agents(key) ON DELETE RESTRICT,
+    PRIMARY KEY (profile_key, role)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_profile_roles_agent ON agent_profile_roles(agent_key);
+
+-- These columns are added after agent_profiles exists so old installations can
+-- be upgraded in place while every existing row keeps the original pentest flow.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS agent_profile_key TEXT NOT NULL DEFAULT 'pentest'
+    REFERENCES agent_profiles(key) ON DELETE RESTRICT;
+ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS agent_profile_key TEXT NOT NULL DEFAULT 'pentest'
+    REFERENCES agent_profiles(key) ON DELETE RESTRICT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'standard'
+    CHECK (access_mode IN ('standard','source_assisted','unauthenticated'));
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coordination_mode TEXT NOT NULL DEFAULT 'orchestrated'
+    CHECK (coordination_mode IN ('orchestrated'));
+ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'standard'
+    CHECK (access_mode IN ('standard','source_assisted','unauthenticated'));
+ALTER TABLE task_templates ADD COLUMN IF NOT EXISTS coordination_mode TEXT NOT NULL DEFAULT 'orchestrated'
+    CHECK (coordination_mode IN ('orchestrated'));
+-- Rows created by the previous Agent Profile release had no separate access
+-- dimension. Preserve its vuln_research semantics during the one-way upgrade.
+UPDATE tasks SET access_mode='source_assisted'
+WHERE agent_profile_key='vuln_research' AND access_mode='standard';
+UPDATE task_templates SET access_mode='source_assisted'
+WHERE agent_profile_key='vuln_research' AND access_mode='standard';
+DROP TRIGGER IF EXISTS trg_agent_profiles_upd ON agent_profiles;
+CREATE TRIGGER trg_agent_profiles_upd BEFORE UPDATE ON agent_profiles
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 DROP TRIGGER IF EXISTS trg_agents_upd ON agents;
 CREATE TRIGGER trg_agents_upd BEFORE UPDATE ON agents
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

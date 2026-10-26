@@ -3,6 +3,8 @@
 
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
+export type AccessMode = "standard" | "source_assisted" | "unauthenticated";
+export type CoordinationMode = "orchestrated";
 
 export interface Task {
   distinct_findings?: FindingDistinctStats;
@@ -15,6 +17,9 @@ export interface Task {
   pinned_at?: string | null;
   description: string;
   goal: string;
+  agent_profile_key: string;
+  access_mode: AccessMode;
+  coordination_mode: CoordinationMode;
   status: TaskStatus;
   created_at: string;
   created_unix?: number; // created_at as unix seconds (run-duration calc)
@@ -56,10 +61,27 @@ export interface TaskTemplate {
   name: string;
   description: string;
   goal: string;
+  agent_profile_key: string;
+  access_mode: AccessMode;
+  coordination_mode: CoordinationMode;
   category_id?: number | null; // 预设分类；null/缺省=无
   intercept_rules?: AssetInterceptRuleInput[]; // 预设的任务级拦截/允许规则
   created_at: string;
   updated_at: string;
+}
+
+export interface AgentProfile {
+  key: string;
+  name: string;
+  description: string;
+  builtin: boolean;
+  default_coverage_enabled: boolean;
+  roles: {
+    goals: string;
+    planner: string;
+    worker: string;
+    main: string;
+  };
 }
 
 export interface DeleteTaskOptions {
@@ -406,7 +428,7 @@ export interface Company {
 }
 
 // ---- Exploration graph (per task) ----
-export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
+export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest" | "hypothesis" | "checkpoint";
 export type GoalState = "open" | "met" | "abandoned";
 export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";

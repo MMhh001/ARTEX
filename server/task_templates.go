@@ -19,11 +19,14 @@ const maxTaskTemplateRequestBytes = 512 << 10
 // category_id / intercept_rules presence is detected via the raw key set (see
 // decodeTaskTemplateRequest) so a PATCH can clear category to null.
 type taskTemplateRequest struct {
-	Name           *string                `json:"name"`
-	Description    *string                `json:"description"`
-	Goal           *string                `json:"goal"`
-	CategoryID     *int64                 `json:"category_id"`
-	InterceptRules []taskInterceptRuleReq `json:"intercept_rules"`
+	Name             *string                `json:"name"`
+	Description      *string                `json:"description"`
+	Goal             *string                `json:"goal"`
+	AgentProfileKey  *string                `json:"agent_profile_key"`
+	AccessMode       *string                `json:"access_mode"`
+	CoordinationMode *string                `json:"coordination_mode"`
+	CategoryID       *int64                 `json:"category_id"`
+	InterceptRules   []taskInterceptRuleReq `json:"intercept_rules"`
 }
 
 // decodeTaskTemplateRequest decodes the body into req and returns the set of
@@ -89,6 +92,10 @@ func writeTaskTemplateErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, "模板名称已存在")
 	case errors.Is(err, db.ErrTaskTemplateNotFound):
 		writeErr(w, http.StatusNotFound, "task template not found")
+	case errors.Is(err, db.ErrAgentProfileNotFound), errors.Is(err, db.ErrAgentProfileIncomplete):
+		writeErr(w, http.StatusBadRequest, "Agent Profile 不存在或配置不完整")
+	case errors.Is(err, db.ErrTaskModeInvalid):
+		writeErr(w, http.StatusBadRequest, "任务访问/协作模式无效："+err.Error())
 	default:
 		writeErr(w, http.StatusInternalServerError, err.Error())
 	}
@@ -126,11 +133,14 @@ func (s *Server) pgCreateTaskTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	template, err := pg.CreateTaskTemplate(db.TaskTemplateInput{
-		Name:           stringValue(req.Name),
-		Description:    stringValue(req.Description),
-		Goal:           stringValue(req.Goal),
-		CategoryID:     req.CategoryID,
-		InterceptRules: rules,
+		Name:             stringValue(req.Name),
+		Description:      stringValue(req.Description),
+		Goal:             stringValue(req.Goal),
+		AgentProfileKey:  stringValue(req.AgentProfileKey),
+		AccessMode:       stringValue(req.AccessMode),
+		CoordinationMode: stringValue(req.CoordinationMode),
+		CategoryID:       req.CategoryID,
+		InterceptRules:   rules,
 	})
 	if err != nil {
 		writeTaskTemplateErr(w, err)
@@ -160,11 +170,23 @@ func (s *Server) pgUpdateTaskTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 	_, catPresent := present["category_id"]
 	_, rulesPresent := present["intercept_rules"]
-	if req.Name == nil && req.Description == nil && req.Goal == nil && !catPresent && !rulesPresent {
-		writeErr(w, http.StatusBadRequest, "至少需要提供 name、description、goal、category_id 或 intercept_rules")
+	_, profilePresent := present["agent_profile_key"]
+	_, accessPresent := present["access_mode"]
+	_, coordinationPresent := present["coordination_mode"]
+	if req.Name == nil && req.Description == nil && req.Goal == nil && !profilePresent && !accessPresent && !coordinationPresent && !catPresent && !rulesPresent {
+		writeErr(w, http.StatusBadRequest, "至少需要提供一个可编辑字段")
 		return
 	}
 	patch := db.TaskTemplatePatch{Name: req.Name, Description: req.Description, Goal: req.Goal}
+	if profilePresent {
+		patch.AgentProfileKey = req.AgentProfileKey
+	}
+	if accessPresent {
+		patch.AccessMode = req.AccessMode
+	}
+	if coordinationPresent {
+		patch.CoordinationMode = req.CoordinationMode
+	}
 	if catPresent {
 		patch.SetCategoryID = true
 		patch.CategoryID = req.CategoryID

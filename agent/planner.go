@@ -21,6 +21,7 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
+	agentKey          string
 	findingRecorder   FindingRecorder
 	prov              llm.Provider
 	model             string
@@ -39,6 +40,7 @@ type Planner struct {
 	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
 	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
 	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
+	taskPolicy        string
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -49,10 +51,17 @@ type Planner struct {
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
-	return &Planner{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, todos: map[int64]*actool.TodoStore{}}
+	return NewPlannerForAgentKey("planner", prov, model, workDir, tx, window, maxTurns)
+}
+
+func NewPlannerForAgentKey(agentKey string, prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
+	return &Planner{agentKey: agentKey, prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, todos: map[int64]*actool.TodoStore{}}
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetTaskPolicy appends a code-owned task mode boundary to every planning round.
+func (p *Planner) SetTaskPolicy(policy string) { p.taskPolicy = strings.TrimSpace(policy) }
 
 // SetCompactor wires the cold-node compactor (cold-digest §7). Called each
 // planner wake-up to advance the round counter, maintain cold stamps, and
@@ -340,7 +349,11 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 不重复、不硬凑；但目标未达成、又有未覆盖且更深的打法时，该派就派。简洁、聚焦、高效。`
 
 func plannerSystem(goal, dataDir, workDir string) string {
-	body := renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
+	return plannerSystemForAgent("planner", goal, dataDir, workDir)
+}
+
+func plannerSystemForAgent(agentKey, goal, dataDir, workDir string) string {
+	body := renderSystem(agentKey, defaultPromptForAgent(agentKey, plannerDefaultTmpl), PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
 	return body + artifactSpec(workDir)
 }
 
@@ -359,6 +372,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
+	tsx.requireIndependentFinding = p.agentKey == "vuln_planner"
 	tsx.SetFindingRecorder(p.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -372,9 +386,13 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
+	domainTools := tsx.DropCoverageTools(tsx.PlannerTools())
+	if p.agentKey == "vuln_planner" {
+		domainTools = append(domainTools, tsx.hypothesisTools()...)
+	}
+	base := append(domainTools, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
-	tools, def, cleanup := AugmentTools(ctx, "planner", base)
+	tools, def, cleanup := AugmentTools(ctx, p.agentKey, base)
 	defer cleanup()
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
@@ -390,17 +408,21 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	sysBody := plannerSystemForAgent(p.agentKey, goal, p.workDir, taskDir)
+	if p.agentKey == "vuln_planner" {
+		sysBody += vulnPlannerResearchPolicy
+	}
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
+	sysBody = appendTaskPolicy(sysBody, p.taskPolicy)
 	system, boundary := deferredSystem(sysBody, def)
 	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
 	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
 	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
-	settle := wrapupSettlement("planner", nil)
+	settle := wrapupSettlement(p.agentKey, nil)
 	if tc.DeadlineUnix > 0 {
-		settle = wrapupSettlementForTask("planner", nil, clamped)
+		settle = wrapupSettlementForTask(p.agentKey, nil, clamped)
 	}
 	opts := agentcore.Options{
 		Provider:        p.prov,
@@ -469,5 +491,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 				emit(r)
 			}
 		})
+	if p.agentKey == "vuln_planner" {
+		if checkpointErr := tsx.saveResearchCheckpoint(); checkpointErr != nil && err == nil {
+			err = fmt.Errorf("save vulnerability research checkpoint: %w", checkpointErr)
+		}
+	}
 	return tsx.GoalMet, tsx.Reason, err
 }

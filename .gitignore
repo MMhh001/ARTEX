@@ -44,6 +44,9 @@ Thumbs.db
 /artex.old
 /artex.failed
 /artex.upgrade.json
+/artex.pre-*
+/*.log
+/selfcheck.sh
 /server/webui/dist/
 /dist/
 

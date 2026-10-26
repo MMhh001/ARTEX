@@ -33,13 +33,19 @@ type ToolSeed struct {
 // 原样放行、不覆盖，行为与从前一致。只有 artex 自己的领域工具入表可管。
 func builtinToolsByAgent() map[string][]actool.CoreTool {
 	ts := NewToolSet(nil, "")
+	vulnPlannerTools := append(ts.PlannerTools(), ts.hypothesisTools()...)
+	vulnWorkerTools := append(ts.WorkerTools(), ts.hypothesisTools()...)
 	return map[string][]actool.CoreTool{
-		"mainagent": ts.MainAgentTools(),
-		"planner":   ts.PlannerTools(),
-		"worker":    ts.WorkerTools(),
+		"mainagent":      ts.MainAgentTools(),
+		"vuln_mainagent": ts.MainAgentTools(),
+		"planner":        ts.PlannerTools(),
+		"vuln_planner":   vulnPlannerTools,
+		"worker":         ts.WorkerTools(),
+		"vuln_worker":    vulnWorkerTools,
 		// goals（目标拆解器）默认绑 set_goals + set_constraints：靠它们把拆出的目标、
 		// 抽出的操作约束写进库。与 mainagent 共用同一受管工具，web 端可改描述/schema、按 agent 勾选。
-		"goals": {ts.setGoals(), ts.setConstraints()},
+		"goals":      {ts.setGoals(), ts.setConstraints()},
+		"vuln_goals": {ts.setGoals(), ts.setConstraints()},
 		// auto 默认绑漏洞上报 + 资产管理工具，其他域工具可在 UI 按需勾选。
 		// 新库由此 seed 写入；老库由 seedAutoDefaultBindings 迁移。
 		"auto": {ts.addFinding(), ts.insertAssets(), ts.addCompanyScope(), ts.listAssets(), ts.listCompanies()},
@@ -62,7 +68,7 @@ var defaultUnbound = map[string]bool{"goal_met": true}
 // 多个 agent 都有）合成一条，Agents 取并集；defaultUnbound 里的工具则强制绑定为空。
 func BuiltinToolSeeds() []ToolSeed {
 	byAgent := builtinToolsByAgent()
-	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
+	order := []string{"mainagent", "goals", "planner", "worker", "vuln_mainagent", "vuln_goals", "vuln_planner", "vuln_worker", "auto", "pentest"}
 
 	type acc struct {
 		tool   actool.CoreTool

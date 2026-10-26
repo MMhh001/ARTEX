@@ -106,11 +106,16 @@ func (s *Server) taskLLMResolutionHandler(w http.ResponseWriter, r *http.Request
 		writeErr(w, 404, "task not found")
 		return
 	}
+	profile, err := s.m.pg.AgentProfileByKey(t.AgentProfileKey)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "resolve agent profile: "+err.Error())
+		return
+	}
 	roles := map[string]taskLLMResolution{}
 	for responseKey, agentKey := range map[string]string{
-		"mainagent": "mainagent",
-		"planner":   "planner",
-		"worker":    "worker",
+		"mainagent": profile.Roles.Main,
+		"planner":   profile.Roles.Planner,
+		"worker":    profile.Roles.Worker,
 	} {
 		resolved, err := s.resolveTaskRoleLLM(t, agentKey)
 		if err != nil {

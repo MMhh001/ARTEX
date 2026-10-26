@@ -23,6 +23,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -342,6 +343,9 @@ function TaskDetailInner() {
     controlIcon = <PlayIcon data-icon="inline-start" />;
     controlLabel = "恢复";
   }
+  let taskModeLabel = "渗透测试";
+  if (task.access_mode === "unauthenticated") taskModeLabel = "U Agent · 未认证";
+  else if (task.agent_profile_key === "vuln_research") taskModeLabel = "漏洞挖掘";
   const archiveTrigger = (
     <Button
       size="icon-sm"
@@ -367,6 +371,9 @@ function TaskDetailInner() {
           <h1 className="min-w-0 flex-1 truncate text-sm font-semibold" title={task.name || task.description}>
             {task.name || task.description}
           </h1>
+          <Badge variant={task.agent_profile_key === "vuln_research" ? "secondary" : "outline"}>
+            {taskModeLabel}
+          </Badge>
           <code className="hidden rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground sm:inline">
             {task.id}
           </code>
@@ -430,7 +437,11 @@ function TaskDetailInner() {
           <OverviewTab taskId={id} />
         </TabsContent>
         <TabsContent value="graph" className="mt-0">
-          <GraphTab taskId={id} />
+          <GraphTab
+            taskId={id}
+            goal={task.goal}
+            showResearchProgress={task.agent_profile_key === "vuln_research" && task.access_mode === "unauthenticated"}
+          />
         </TabsContent>
         <TabsContent value="broadcast" className="mt-0">
           <BroadcastTab taskId={id} />

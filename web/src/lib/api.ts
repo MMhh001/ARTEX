@@ -11,6 +11,7 @@ import type {
   Activity,
   Agent,
   AgentDetail,
+  AgentProfile,
   AgentTrigger,
   ArchiveBatchItem,
   Asset,
@@ -303,6 +304,9 @@ export const api = {
     categoryId?: number;
     description: string;
     goal: string;
+    agentProfileKey?: string;
+    accessMode?: "standard" | "source_assisted" | "unauthenticated";
+    coordinationMode?: "orchestrated";
     llmProfileIds?: number[];
     sourceTaskIds?: string[];
     companyIds?: number[];
@@ -318,13 +322,16 @@ export const api = {
       category_id: input.categoryId ?? null,
       description: input.description,
       goal: input.goal,
+      agent_profile_key: input.agentProfileKey ?? "pentest",
+      access_mode: input.accessMode,
+      coordination_mode: input.coordinationMode ?? "orchestrated",
       llm_profile_ids: input.llmProfileIds ?? [],
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
       timeout_seconds: input.timeoutSeconds ?? 0,
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
-      coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      coverage_enabled: input.coverageEnabled, // 省略=Agent Profile 默认值；false=显式关闭
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       schedule: input.schedule ? schedulePayload(input.schedule) : undefined,
     }),
@@ -356,12 +363,35 @@ export const api = {
       category_id: categoryId ?? null,
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
+  agentProfiles: () => get<{ profiles: AgentProfile[] }>("/agent-profiles").then((r) => arr(r.profiles)),
   createTaskTemplate: (
-    input: Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">,
+    input: Pick<
+      TaskTemplate,
+      | "name"
+      | "description"
+      | "goal"
+      | "agent_profile_key"
+      | "access_mode"
+      | "coordination_mode"
+      | "category_id"
+      | "intercept_rules"
+    >,
   ) => post<TaskTemplate>("/task-templates", input),
   updateTaskTemplate: (
     id: number,
-    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
+    input: Partial<
+      Pick<
+        TaskTemplate,
+        | "name"
+        | "description"
+        | "goal"
+        | "agent_profile_key"
+        | "access_mode"
+        | "coordination_mode"
+        | "category_id"
+        | "intercept_rules"
+      >
+    >,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>

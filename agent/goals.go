@@ -108,6 +108,18 @@ func DecomposeGoals(ctx context.Context, prov llm.Provider, dataDir, goalText, d
 // letting the caller own provider selection/failover. maxTokens is the profile's
 // per-reply output cap (0 = send none).
 func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, maxTokens int, emit func(db.Activity)) []GoalSpec {
+	return DecomposeGoalsWithProviderForAgent(ctx, "goals", prov, dataDir, goalText, desc, as, ts, taskID, nonStreaming, maxTokens, emit)
+}
+
+// DecomposeGoalsWithProviderForAgent is the profile-aware form. agentKey selects
+// the editable prompt, tool/skill visibility, model binding and usage identity.
+func DecomposeGoalsWithProviderForAgent(ctx context.Context, agentKey string, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, maxTokens int, emit func(db.Activity)) []GoalSpec {
+	return DecomposeGoalsWithProviderForAgentAndPolicy(ctx, agentKey, prov, dataDir, goalText, desc, as, ts, taskID, nonStreaming, maxTokens, "", emit)
+}
+
+// DecomposeGoalsWithProviderForAgentAndPolicy adds a code-owned task mode
+// boundary to the profile-aware goal decomposition prompt.
+func DecomposeGoalsWithProviderForAgentAndPolicy(ctx context.Context, agentKey string, prov llm.Provider, dataDir, goalText, desc string, as *db.AssetStore, ts *db.ExplorationStore, taskID int64, nonStreaming bool, maxTokens int, taskPolicy string, emit func(db.Activity)) []GoalSpec {
 	if prov == nil {
 		return nil
 	}
@@ -127,7 +139,7 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 	// Description rides in the user message (same channel as the goal), NOT via the
 	// {{.EngagementDescription}} template var — else a prompt that references the var
 	// would inject the description twice. System prompt stays pure static instructions.
-	sys := renderSystem("goals", goalsDefaultTmpl, GoalsVars{DataDir: dataDir, Now: nowStr()})
+	sys := renderSystem(agentKey, defaultPromptForAgent(agentKey, goalsDefaultTmpl), GoalsVars{DataDir: dataDir, Now: nowStr()})
 	// set_constraints 始终可用(不依赖 asset store):正文已含「先抽操作约束再拆目标」这步
 	// (可在 agent 编辑页改措辞),这里只需接上工具。
 	tools := []actool.CoreTool{tsx.setGoals(), tsx.setConstraints()}
@@ -138,6 +150,7 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		tools = append(tools, tsx.addTaskScope())
 		sys += goalsScopeTail
 	}
+	sys = appendTaskPolicy(sys, taskPolicy)
 	userMsg := "任务目标：\n" + goalText
 	if d := strings.TrimSpace(desc); d != "" {
 		userMsg += "\n\n任务描述（背景信息，可能含靶标范围/flag 数量/交战说明；仅供参考，不要臆造其中未提及的内容）：\n" + d

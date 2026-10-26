@@ -20,6 +20,7 @@ import (
 )
 
 type taskAgentBundle struct {
+	profile        *db.AgentProfile
 	runtime        *taskLLMRuntime // goal decomposition runtime
 	plannerRuntime *taskLLMRuntime
 	workerRuntime  *taskLLMRuntime
@@ -549,29 +550,40 @@ func (s *Server) invalidateTaskAgents() {
 	s.taskAgentMu.Unlock()
 }
 
-func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
+func (s *Server) agentsForTask(t *Task) (*taskAgentBundle, error) {
+	if t == nil || s.m == nil || s.m.PG() == nil {
+		return nil, fmt.Errorf("task agent profile resolver is unavailable")
+	}
 	s.taskAgentMu.Lock()
 	defer s.taskAgentMu.Unlock()
-	if bundle := s.taskAgents[t.ID]; bundle != nil {
-		return bundle
+	if s.taskAgents == nil {
+		s.taskAgents = map[string]*taskAgentBundle{}
 	}
-	goalRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "goals"}
-	plannerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "planner"}
-	workerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "worker"}
-	mainRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
+	if bundle := s.taskAgents[t.ID]; bundle != nil {
+		return bundle, nil
+	}
+	profile, err := s.m.PG().AgentProfileByKey(t.AgentProfileKey)
+	if err != nil {
+		return nil, fmt.Errorf("task %s agent profile %q: %w", t.ID, t.AgentProfileKey, err)
+	}
+	keys := profile.Roles
+	goalRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: keys.Goals}
+	plannerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: keys.Planner}
+	workerRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: keys.Worker}
+	mainRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: keys.Main}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	window := workerRuntime.CompactionWindow()
-	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
+	wk := agent.NewWorkerForAgentKey(keys.Worker, workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns(keys.Worker))
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
 	wk.SetNoaEnabled(s.m.NoaCompactionEnabled)     // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
-	wk.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
+	wk.SetRunTimeout(time.Duration(s.agentRunSeconds(keys.Worker)) * time.Second)
 	wk.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	wk.SetWebSearch(s.webSearchFor("worker"))
+	wk.SetWebSearch(s.webSearchFor(keys.Worker))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
-	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl := agent.NewPlannerForAgentKey(keys.Planner, plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns(keys.Planner))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
@@ -580,27 +592,33 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	pl.SetWebSearch(s.webSearchFor("planner"))
+	pl.SetWebSearch(s.webSearchFor(keys.Planner))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
-	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
+	main := agent.NewMainAgentForAgentKey(keys.Main, mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns(keys.Main))
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)
 	main.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(平台级开关,每 run 读)
 	main.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	main.SetWebSearch(s.webSearchFor("mainagent"))
+	main.SetWebSearch(s.webSearchFor(keys.Main))
 	main.SetSteerWork(s.engine.SteerWork) // steer_work：人对运行中 work 实时纠偏
+	if t.AccessMode == db.AccessModeUnauthenticated {
+		wk.SetTaskPolicy(agent.UnauthenticatedResearchPolicy)
+		pl.SetTaskPolicy(agent.UnauthenticatedResearchPolicy)
+		main.SetTaskPolicy(agent.UnauthenticatedResearchPolicy)
+	}
 	bundle := &taskAgentBundle{
+		profile: profile,
 		runtime: goalRuntime, plannerRuntime: plannerRuntime, workerRuntime: workerRuntime,
 		mainRuntime: mainRuntime, pl: pl, wk: wk, main: main,
 	}
 	s.taskAgents[t.ID] = bundle
-	return bundle
+	return bundle, nil
 }
 
 func (s *Server) syncTaskLLMState(pt *db.Task) {

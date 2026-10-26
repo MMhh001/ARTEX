@@ -245,6 +245,9 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			"description":            strParam("任务描述(简短标题)"),
 			"goal":                   strParam("任务目标(要达成什么)"),
 			"parent_ref":             strParam("可选：父任务 id(做父子关联)"),
+			"agent_profile_key":      strParam("可选：任务 Agent Profile key；留空则继承父任务，没有父任务时默认 pentest"),
+			"access_mode":            strParam("可选：访问模式；留空则继承父任务。漏洞挖掘支持 source_assisted 或 unauthenticated"),
+			"coordination_mode":      strParam("可选：协作模式；当前仅支持 orchestrated，留空则继承父任务"),
 			"source_task_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": fmt.Sprintf("可选：只读继承的来源任务 id 列表(最多 %d 个)。子任务可只读引用这些任务已探明的资产/结论作为起点；与 parent_ref 的纯父子指针不同，这是内容继承。", db.MaxTaskSourceCount)},
 			"llm_profile_id":         map[string]any{"type": "integer", "description": "可选：指定本子任务 planner/worker 用的 LLM 配置 id(见 list_llm_profiles)；留空则继承父任务、再回退全局激活配置"},
 			"timeout_seconds":        map[string]any{"type": "integer", "description": "可选：任务级超时(秒)。到点后触发优雅收尾并进入 timeout 终态；留空或 0 = 不限时"},
@@ -256,6 +259,9 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 				Description          string          `json:"description"`
 				Goal                 string          `json:"goal"`
 				ParentRef            string          `json:"parent_ref"`
+				AgentProfileKey      string          `json:"agent_profile_key"`
+				AccessMode           string          `json:"access_mode"`
+				CoordinationMode     string          `json:"coordination_mode"`
 				SourceTaskIDs        []string        `json:"source_task_ids"`
 				LLMProfileID         json.RawMessage `json:"llm_profile_id"`
 				TimeoutSeconds       int             `json:"timeout_seconds"`
@@ -305,9 +311,26 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			if pin != nil {
 				llmIDs = []int64{*pin}
 			}
+			agentProfileKey := strings.TrimSpace(a.AgentProfileKey)
+			accessMode := strings.TrimSpace(a.AccessMode)
+			coordinationMode := strings.TrimSpace(a.CoordinationMode)
+			if agentProfileKey == "" && a.ParentRef != "" {
+				if parent, ok := s.m.Task(a.ParentRef); ok {
+					agentProfileKey = parent.AgentProfileKey
+					if accessMode == "" {
+						accessMode = parent.AccessMode
+					}
+					if coordinationMode == "" {
+						coordinationMode = parent.CoordinationMode
+					}
+				}
+			}
 			t, err := s.m.CreateTaskWithOptions(a.Description, a.Goal, db.TaskCreateOptions{
 				SourceTaskIDs:        sourceIDs,
 				LLMProfileIDs:        llmIDs,
+				AgentProfileKey:      agentProfileKey,
+				AccessMode:           accessMode,
+				CoordinationMode:     coordinationMode,
 				TimeoutSeconds:       a.TimeoutSeconds,
 				PlanHeartbeatSeconds: a.PlanHeartbeatSeconds,
 			})
