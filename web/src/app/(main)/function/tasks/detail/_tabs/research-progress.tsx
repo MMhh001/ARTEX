@@ -15,6 +15,12 @@ const HYPOTHESIS_STAGES = [
   ["independently_reproduced", "独立复现"],
 ] as const;
 
+const EVIDENCE_TIERS = [
+  ["source_analysis", "源码/配置分析"],
+  ["test_fixture", "测试夹具"],
+  ["target_runtime", "目标运行时"],
+] as const;
+
 const GOAL_STATE_LABEL: Record<string, string> = {
   met: "已验收",
   open: "进行中",
@@ -35,6 +41,23 @@ function stringField(payload: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function dynamicValidationLabel(value: unknown): string {
+  switch (value) {
+    case "ready": return "可执行";
+    case "blocked": return "受阻";
+    case "not_applicable": return "不适用";
+    default: return "未知";
+  }
+}
+
+function preflightStateLabel(value: unknown): string {
+  switch (value) {
+    case "ready": return "已就绪";
+    case "blocked": return "受阻/未就绪";
+    default: return "未知";
+  }
+}
+
 export function ResearchProgress({ goal, nodes }: { goal: string; nodes: TaskNode[] }) {
   // Only report the current task's work; inherited context is reference material,
   // not progress owned by this U-Agent run.
@@ -48,6 +71,9 @@ export function ResearchProgress({ goal, nodes }: { goal: string; nodes: TaskNod
   const findings = localNodes.filter((node) => node.type === "finding" && node.state === "confirmed");
   const checkpoints = localNodes.filter((node) => node.type === "checkpoint");
   const checkpoint = checkpoints.length ? payloadOf(checkpoints[checkpoints.length - 1]) : {};
+  const preflight = checkpoint.environment_preflight && typeof checkpoint.environment_preflight === "object"
+    ? (checkpoint.environment_preflight as Record<string, unknown>)
+    : null;
   const nextHop = checkpoint.next_hop && typeof checkpoint.next_hop === "object"
     ? (checkpoint.next_hop as Record<string, unknown>)
     : {};
@@ -115,8 +141,44 @@ export function ResearchProgress({ goal, nodes }: { goal: string; nodes: TaskNod
               <Badge variant="outline">受阻 {hypotheses.filter((node) => node.state === "blocked").length}</Badge>
               <Badge variant="outline">确认漏洞 {findings.length}</Badge>
             </div>
+            <p className="mt-2 text-xs text-muted-foreground">证据类型按当前假设记录统计；测试夹具证明逻辑行为，不代表目标版本已验证。</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {EVIDENCE_TIERS.map(([tier, label]) => (
+                <Badge key={tier} variant="outline">
+                  {label} {hypotheses.filter((node) => stringField(payloadOf(node), "evidence_tier") === tier).length}
+                </Badge>
+              ))}
+              <Badge variant="outline">未标注 {hypotheses.filter((node) => !stringField(payloadOf(node), "evidence_tier")).length}</Badge>
+            </div>
           </section>
         </div>
+
+        <section className="rounded-lg border p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-sm font-medium">目标版本与环境预检</h3>
+            <Badge variant={preflight ? "secondary" : "outline"}>{preflight ? "已记录" : "尚未记录"}</Badge>
+          </div>
+          {preflight ? (
+            <div className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-3">
+              <p><span className="text-muted-foreground">目标版本：</span>{String(preflight.target_version || "unknown")}</p>
+              <p><span className="text-muted-foreground">源码修订/制品：</span>{String(preflight.source_revision || "unknown")}</p>
+              <p><span className="text-muted-foreground">构建环境：</span>{String(preflight.build_environment || "unknown")}</p>
+              <p><span className="text-muted-foreground">依赖：</span>{preflightStateLabel(preflight.dependencies_status)}</p>
+              <p><span className="text-muted-foreground">目标启动：</span>{preflightStateLabel(preflight.target_startup)}</p>
+              <p><span className="text-muted-foreground">动态验证：</span>{dynamicValidationLabel(preflight.dynamic_validation)}</p>
+              {Array.isArray(preflight.blockers) && preflight.blockers.length > 0 && (
+                <div className="sm:col-span-2 xl:col-span-3">
+                  <span className="text-muted-foreground">阻塞原因：</span>{preflight.blockers.map(String).join("；")}
+                </div>
+              )}
+              {typeof preflight.notes === "string" && preflight.notes && (
+                <p className="text-muted-foreground sm:col-span-2 xl:col-span-3">{preflight.notes}</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">研究记录还没有说明目标版本、构建依赖和动态验证条件。完成预检前，不能把动态验证视为已具备。</p>
+          )}
+        </section>
 
         <div className="grid gap-3 border-t pt-3 text-sm md:grid-cols-2">
           <section>

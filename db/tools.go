@@ -104,6 +104,64 @@ func (d *DB) RefreshToolDefaults(key, desc string, schema json.RawMessage) error
 	return err
 }
 
+// MergeToolSchemaProperties adds newly introduced optional parameters to a seeded
+// system tool without overwriting existing descriptions, custom parameter text,
+// bindings, enabled state, or unrelated schema properties.
+func (d *DB) MergeToolSchemaProperties(key string, defaults json.RawMessage) error {
+	var incoming map[string]json.RawMessage
+	if err := json.Unmarshal(defaults, &incoming); err != nil {
+		return err
+	}
+	if len(incoming["properties"]) == 0 {
+		return nil
+	}
+	var additions map[string]json.RawMessage
+	if err := json.Unmarshal(incoming["properties"], &additions); err != nil {
+		return err
+	}
+	if len(additions) == 0 {
+		return nil
+	}
+	tool, err := d.GetTool(key)
+	if err != nil || tool == nil || !tool.System {
+		return err
+	}
+	var current map[string]json.RawMessage
+	if err := json.Unmarshal(tool.Schema, &current); err != nil {
+		return err
+	}
+	if current == nil {
+		current = map[string]json.RawMessage{}
+	}
+	properties := map[string]json.RawMessage{}
+	if raw := current["properties"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &properties); err != nil {
+			return err
+		}
+	}
+	changed := false
+	for name, property := range additions {
+		if _, exists := properties[name]; !exists {
+			properties[name] = property
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	encodedProperties, err := json.Marshal(properties)
+	if err != nil {
+		return err
+	}
+	current["properties"] = encodedProperties
+	encoded, err := json.Marshal(current)
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`UPDATE tools SET schema=$2, updated_at=now() WHERE key=$1 AND system`, key, encoded)
+	return err
+}
+
 func scanTool(rows interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
 	var agents []byte

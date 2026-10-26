@@ -20,8 +20,12 @@ var hypothesisFields = map[string]bool{
 	"title": true, "hypothesis": true, "entry": true,
 	"attacker_controlled_input": true, "call_chain": true,
 	"trust_boundary": true, "sink": true, "evidence": true,
-	"counterevidence": true, "next_step": true,
+	"evidence_tier": true, "counterevidence": true, "next_step": true,
 	"evidence_node_ids": true, "asset_ids": true,
+}
+
+var hypothesisEvidenceTiers = map[string]bool{
+	"source_analysis": true, "test_fixture": true, "target_runtime": true,
 }
 
 // CreateHypothesis stores a structured research hypothesis in the task graph.
@@ -162,6 +166,8 @@ func ensureIndependentReviewTx(tx *sql.Tx, explorationID, hypothesisID int64, pa
 	return id, nil
 }
 
+// SaveResearchCheckpoint merges top-level fields so worker preflight updates
+// survive the planner's periodic checkpoint refresh.
 func (s *ExplorationStore) SaveResearchCheckpoint(payload map[string]any) (int64, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -174,7 +180,7 @@ func (s *ExplorationStore) SaveResearchCheckpoint(payload map[string]any) (int64
 	err = s.db.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
 		VALUES ($1,$2,$3,0,'active','planner')
 		ON CONFLICT (exploration_id) WHERE kind='checkpoint'
-		DO UPDATE SET payload=EXCLUDED.payload, content_version=exploration_nodes.content_version+1
+		DO UPDATE SET payload=exploration_nodes.payload || EXCLUDED.payload, content_version=exploration_nodes.content_version+1
 		RETURNING id`, s.expID, KindCheckpoint, jsonbClean(encoded)).Scan(&id)
 	return id, err
 }
@@ -195,6 +201,13 @@ func (s *ExplorationStore) GetNodeByKind(kind string) (*Node, error) {
 func validateHypothesisPayload(payload map[string]any) error {
 	for key, value := range payload {
 		if key == "evidence_node_ids" || key == "asset_ids" {
+			continue
+		}
+		if key == "evidence_tier" {
+			tier, ok := value.(string)
+			if !ok || !hypothesisEvidenceTiers[tier] {
+				return fmt.Errorf("%w: evidence_tier must be source_analysis, test_fixture, or target_runtime", ErrInvalidHypothesis)
+			}
 			continue
 		}
 		if text, ok := value.(string); ok && len(text) > 32*1024 {

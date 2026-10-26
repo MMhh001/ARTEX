@@ -232,6 +232,11 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if err := pg.SeedTool(s.Key, s.Desc, schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
+		if s.Key == "create_vulnerability_hypothesis" || s.Key == "update_vulnerability_hypothesis" {
+			if err := pg.MergeToolSchemaProperties(s.Key, schema); err != nil {
+				log.Printf("[tools] merge %s research schema failed: %v", s.Key, err)
+			}
+		}
 	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability
@@ -298,6 +303,22 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if migrationOK {
 			if err := pg.SetSetting("vuln_research_hypothesis_tools_v1", "done"); err != nil {
 				log.Printf("[tools] 保存漏洞假设工具迁移状态失败: %v", err)
+			}
+		}
+	}
+	// The environment preflight tool was added after the original vulnerability
+	// profile migration had completed in existing installations.
+	if v, _, _ := pg.GetSetting("vuln_research_preflight_v1"); v != "done" {
+		migrationOK := true
+		for _, agentKey := range []string{"vuln_planner", "vuln_worker"} {
+			if err := pg.AddAgentToToolBinding(agentKey, []string{"record_research_preflight"}); err != nil {
+				migrationOK = false
+				log.Printf("[tools] 增加漏洞研究预检工具绑定 %s 失败: %v", agentKey, err)
+			}
+		}
+		if migrationOK {
+			if err := pg.SetSetting("vuln_research_preflight_v1", "done"); err != nil {
+				log.Printf("[tools] 保存漏洞研究预检工具迁移状态失败: %v", err)
 			}
 		}
 	}

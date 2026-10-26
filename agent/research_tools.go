@@ -23,7 +23,7 @@ var hypothesisStateDescriptions = map[string]string{
 }
 
 func (t *ToolSet) hypothesisTools() []actool.CoreTool {
-	return []actool.CoreTool{t.createHypothesis(), t.updateHypothesis(), t.listHypotheses()}
+	return []actool.CoreTool{t.createHypothesis(), t.updateHypothesis(), t.listHypotheses(), t.recordResearchPreflight()}
 }
 
 func (t *ToolSet) createHypothesis() actool.CoreTool {
@@ -38,6 +38,7 @@ func (t *ToolSet) createHypothesis() actool.CoreTool {
 			"trust_boundary":            str("预期被突破的认证、授权、租户或解析边界"),
 			"sink":                      str("危险操作或安全敏感汇点"),
 			"evidence":                  str("目前实际观察到的证据，不足处明确标出"),
+			"evidence_tier":             map[string]any{"type": "string", "enum": []string{"source_analysis", "test_fixture", "target_runtime"}, "description": "当前最高证据等级：源码/配置静态分析、隔离测试夹具，或目标指定版本的实际运行验证；不能把夹具验证标成目标运行时验证"},
 			"counterevidence":           str("已发现的反证；没有则留空"),
 			"next_step":                 str("下一项最小可验证动作"),
 			"evidence_node_ids":         map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本任务内支撑该假设的事实/漏洞节点 id"},
@@ -92,6 +93,7 @@ func (t *ToolSet) updateHypothesis() actool.CoreTool {
 			"trust_boundary":            str("涉及的安全边界"),
 			"sink":                      str("危险操作或安全敏感汇点"),
 			"evidence":                  str("新增的实际证据"),
+			"evidence_tier":             map[string]any{"type": "string", "enum": []string{"source_analysis", "test_fixture", "target_runtime"}, "description": "当前最高证据等级：源码/配置静态分析、隔离测试夹具，或目标指定版本的实际运行验证；不能把夹具验证标成目标运行时验证"},
 			"counterevidence":           str("反证、误报排除或失败原因"),
 			"next_step":                 str("下一项最小验证动作"),
 			"evidence_node_ids":         map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本任务内支撑该假设的 fact/finding 节点 id"},
@@ -160,6 +162,74 @@ func (t *ToolSet) listHypotheses() actool.CoreTool {
 		})
 }
 
+func (t *ToolSet) recordResearchPreflight() actool.CoreTool {
+	return t.writeExpTool("record_research_preflight",
+		"记录漏洞研究开始前的环境预检，并持久保存到研究检查点。明确目标版本/源码修订、构建环境、依赖是否齐备、目标能否启动以及动态验证可行性；未知项必须如实标 unknown 并说明阻塞，不得推定环境已可用。",
+		obj(map[string]any{
+			"target_version":     str("目标产品版本、发行包版本或 unknown"),
+			"source_revision":    str("源码 commit/revision、二进制哈希或 unknown"),
+			"build_environment":  str("构建工具链、运行环境与相关版本；不可用时说明原因"),
+			"dependencies_status": map[string]any{"type": "string", "enum": []string{"ready", "blocked", "unknown"}, "description": "构建/运行依赖状态；未知时不能伪装为未就绪或已就绪"},
+			"target_startup":      map[string]any{"type": "string", "enum": []string{"ready", "blocked", "unknown"}, "description": "能否在当前隔离、授权环境启动目标版本；没有验证时填 unknown"},
+			"dynamic_validation":  map[string]any{"type": "string", "enum": []string{"ready", "blocked", "not_applicable", "unknown"}, "description": "动态验证条件：可用、受阻、不适用或未知"},
+			"blockers":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "构建、依赖、版本或环境方面的具体阻塞"},
+			"notes":               str("预检范围、依据和其他说明"),
+		}, "target_version", "source_revision", "build_environment", "dependencies_status", "target_startup", "dynamic_validation"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var input struct {
+				TargetVersion      string   `json:"target_version"`
+				SourceRevision     string   `json:"source_revision"`
+				BuildEnvironment   string   `json:"build_environment"`
+				DependenciesStatus string   `json:"dependencies_status"`
+				TargetStartup      string   `json:"target_startup"`
+				DynamicValidation string   `json:"dynamic_validation"`
+				Blockers           []string `json:"blockers"`
+				Notes              string   `json:"notes"`
+			}
+			if err := json.Unmarshal(in, &input); err != nil {
+				return actool.Errorf("invalid research preflight JSON"), nil
+			}
+			switch input.DynamicValidation {
+			case "ready", "blocked", "not_applicable", "unknown":
+			default:
+				return actool.Errorf("dynamic_validation must be ready, blocked, not_applicable, or unknown"), nil
+			}
+			for field, value := range map[string]string{
+				"dependencies_status": input.DependenciesStatus,
+				"target_startup":     input.TargetStartup,
+			} {
+				if value != "ready" && value != "blocked" && value != "unknown" {
+					return actool.Errorf(field + " must be ready, blocked, or unknown"), nil
+				}
+			}
+			blockers := make([]string, 0, len(input.Blockers))
+			for _, blocker := range input.Blockers {
+				if blocker = strings.TrimSpace(blocker); blocker != "" {
+					blockers = append(blockers, clipResearchText(blocker, 500))
+				}
+				if len(blockers) == 20 {
+					break
+				}
+			}
+			preflight := map[string]any{
+				"target_version":      strings.TrimSpace(input.TargetVersion),
+				"source_revision":     strings.TrimSpace(input.SourceRevision),
+				"build_environment":   strings.TrimSpace(input.BuildEnvironment),
+				"dependencies_status": input.DependenciesStatus,
+				"target_startup":      input.TargetStartup,
+				"dynamic_validation": input.DynamicValidation,
+				"blockers":           blockers,
+				"notes":              clipResearchText(input.Notes, 2000),
+				"updated_at":          time.Now().UTC(),
+			}
+			id, err := t.ts.SaveResearchCheckpoint(map[string]any{"environment_preflight": preflight})
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("research environment preflight saved to checkpoint #%d", id)), nil
+		})
+}
+
 func validateHypothesisEvidence(store *db.ExplorationStore, values map[string]any) error {
 	raw, ok := values["evidence_node_ids"]
 	if !ok {
@@ -209,6 +279,7 @@ func hypothesisSummary(n *db.Node) map[string]any {
 		"title":             clipResearchText(stringValue(payload["title"]), 180),
 		"hypothesis":        clipResearchText(stringValue(payload["hypothesis"]), 400),
 		"entry":             clipResearchText(stringValue(payload["entry"]), 240),
+		"evidence_tier":     stringValue(payload["evidence_tier"]),
 		"next_step":         clipResearchText(stringValue(payload["next_step"]), 300),
 		"evidence":          clipResearchText(stringValue(payload["evidence"]), 400),
 		"evidence_node_ids": payload["evidence_node_ids"],
