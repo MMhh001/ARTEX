@@ -437,7 +437,11 @@ function TaskDetailInner() {
           <OverviewTab taskId={id} />
         </TabsContent>
         <TabsContent value="graph" className="mt-0">
-          <GraphTab taskId={id} />
+          <GraphTab
+            taskId={id}
+            goal={task.goal}
+            showResearchProgress={task.agent_profile_key === "vuln_research" && task.access_mode === "unauthenticated"}
+          />
         </TabsContent>
         <TabsContent value="broadcast" className="mt-0">
           <BroadcastTab taskId={id} />

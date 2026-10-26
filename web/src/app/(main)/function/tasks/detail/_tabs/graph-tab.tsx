@@ -6,8 +6,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { ExplorationGraph } from "@/components/exploration-graph";
 import { api } from "@/lib/api";
 import type { Edge, TaskNode } from "@/lib/types";
+import { ResearchProgress } from "./research-progress";
 
-export function GraphTab({ taskId }: { taskId: string }) {
+export function GraphTab({ taskId, goal, showResearchProgress }: { taskId: string; goal: string; showResearchProgress: boolean }) {
   const [nodes, setNodes] = React.useState<TaskNode[]>([]);
   const [edges, setEdges] = React.useState<Edge[]>([]);
   // 上一次图数据的签名:轮询拿到相同数据时跳过 setState,避免整图无谓重建(拖动时
@@ -46,10 +47,13 @@ export function GraphTab({ taskId }: { taskId: string }) {
   }, [taskId]);
 
   return (
-    <Card>
-      <CardContent className="p-0">
-        <ExplorationGraph nodes={nodes} edges={edges} className="h-[72vh]" />
-      </CardContent>
-    </Card>
+    <>
+      {showResearchProgress && <ResearchProgress goal={goal} nodes={nodes} />}
+      <Card>
+        <CardContent className="p-0">
+          <ExplorationGraph nodes={nodes} edges={edges} className="h-[72vh]" />
+        </CardContent>
+      </Card>
+    </>
   );
 }
